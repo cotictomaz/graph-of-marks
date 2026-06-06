@@ -257,7 +257,6 @@ from typing import Any, Dict, List, Optional, Union
 import psutil
 import torch
 
-from .models import HFVLModel, VLLMWrapper
 from .preproc import (
     get_preprocessed_path,
     get_scene_graph_path,
@@ -267,7 +266,7 @@ from .preproc import (
 from .types import VQAExample
 
 # Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
-ModelLike = Union[VLLMWrapper, HFVLModel]
+ModelLike = Any
 
 
 def _should_clear_gpu_cache() -> bool:

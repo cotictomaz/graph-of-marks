@@ -153,7 +153,8 @@ except Exception as _exc:
         context_min_iou: float = 0.1  # Minimum IoU for context inclusion
 
         # Object detector configuration and confidence thresholds
-        detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+        # detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+        detectors_to_use: Tuple[str, ...] = ("yolov8")
         threshold_owl: float = 0.10  # OWL-ViT confidence threshold
         threshold_yolo: float = 0.25  # YOLOv8 confidence threshold
         threshold_detectron: float = 0.50  # Detectron2 confidence threshold

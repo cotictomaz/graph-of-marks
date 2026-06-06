@@ -169,7 +169,7 @@ class DepthConfig:
         - vits requires ~100MB GPU memory
         - FP16 requires CUDA compute capability ≥ 7.0 (Volta+)
     """
-    model_name: str = "depth_anything_v2_vitl"   # Default to Depth Anything V2 Large (SOTA)
+    model_name: str = "depth_anything_v2_vits"   # Default to Depth Anything V2 Large (SOTA)
     device: Optional[str] = None
     fp16_on_cuda: bool = True
     cache_maps: bool = True

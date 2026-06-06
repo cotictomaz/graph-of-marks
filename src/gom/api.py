@@ -339,7 +339,7 @@ class GoM:
             "enable_detection_cache": True,
             # Segmentation model config
             "sam_version": "hq",
-            "sam_hq_model_type": "vit_h",
+            "sam_hq_model_type": "vit_b",
             "points_per_side": 64,
             "pred_iou_thresh": 0.90,
             "stability_score_thresh": 0.95,
@@ -361,6 +361,8 @@ class GoM:
 
         self._model_config = PreprocessorConfig(**cfg_dict)
 
+
+        print(f"Object detection models: {self._model_config[]}")
         # Initialize preprocessor (loads models)
         self._preprocessor = ImageGraphPreprocessor(self._model_config)
 
