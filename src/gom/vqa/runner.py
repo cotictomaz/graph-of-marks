@@ -266,7 +266,7 @@ from .preproc import (
 from .types import VQAExample
 
 # Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
-ModelLike =Any
+ModelLike = Any
 
 
 def _should_clear_gpu_cache() -> bool:

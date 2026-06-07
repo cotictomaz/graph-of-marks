@@ -445,8 +445,8 @@ class PreprocessorConfig:
     max_objects_per_question: int = 50  # Maximum objects to retain (performance cap)
 
     # Detection models and confidence thresholds
-    # detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-    detectors_to_use: Tuple[str, ...] = ("yolov8",)
+    detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+    # detectors_to_use: Tuple[str, ...] = ("yolov8",)
     # Conservative defaults to reduce false positives and noise
     threshold_owl: float = 0.60  # OWL-ViT confidence threshold
     threshold_yolo: float = 0.85  # YOLOv8 confidence threshold
@@ -461,7 +461,7 @@ class PreprocessorConfig:
     
     # GroundingDINO detector (SOTA open-vocabulary detection)
     threshold_grounding_dino: float = 0.35  # Lower threshold due to better precision
-    grounding_dino_model: str = "base"  # Model size: "tiny", "base", "large"
+    grounding_dino_model: str = "tiny"  # Model size: "tiny", "base", "large"
     grounding_dino_text_prompt: Optional[str] = None  # Auto-generated if None
     grounding_dino_text_threshold: float = 0.25  # Text-box alignment threshold
 
@@ -496,6 +496,7 @@ class PreprocessorConfig:
     max_distance: float = 20000  # Maximum distance for relationship consideration
 
     # SAM segmentation settings
+    sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
     sam_hq_model_type: str = "vit_s"  # SAM-HQ model size
@@ -678,7 +679,7 @@ class ImageGraphPreprocessor:
 
         # Initialize detector stack (combines open-vocabulary and closed-vocabulary detectors)
         self.detectors: List[Detector] = self._init_detectors()
-        
+        self.logger.info(f"Used detectors: {self.detectors}")
         # DetectorManager: Central orchestration with caching, batching, and advanced fusion
         # Includes aggressive overlap reduction and non-competing detection recovery
         try:
@@ -714,9 +715,12 @@ class ImageGraphPreprocessor:
         self.segmenter: Optional[Segmenter] = self._init_segmenter()
 
         # Depth estimation, and CLIP for semantic similarity
-        depth_config = DepthConfig(device=self.device)
+        depth_config = DepthConfig(model_name="depth_anything_v2_vits", device=self.device)
         self.depth_est = DepthEstimator(config=depth_config)
         
+        self.logger.info(f"Used detectors: {self.detectors}")
+        self.logger.info(f"Used segmenter: {self.segmenter}")
+        self.logger.info(f"Used for depth: {self.depth_est}")
         # Initialize CLIP wrapper with proper config object
         try:
             from gom.utils.clip_utils import CLIPConfig

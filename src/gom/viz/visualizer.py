@@ -225,7 +225,7 @@ class VisualizerConfig:
     on_top_horiz_overlap: float = 0.35
 
     # Auto-scaling for different image sizes/resolutions
-    auto_scale_styles: bool = True
+    auto_scale_styles: bool = False
     style_ref_px: int = 1000  # Reference image size for scaling
     style_ref_dpi: int = 100  # Reference DPI
     style_scale_min: float = 0.5  # Minimum scale factor
