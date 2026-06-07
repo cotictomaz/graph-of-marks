@@ -425,8 +425,8 @@ def preprocess_for_qa(
     cfg_updates.update({
         "input_path": None,                  # in-memory processing instead of directory traversal
         "output_folder": output_folder,
-        "apply_question_filter": bool(apply_question_filter),
-        "aggressive_pruning": bool(aggressive_pruning),
+        # "apply_question_filter": bool(apply_question_filter),
+        # "aggressive_pruning": bool(aggressive_pruning),
         "question": question,
     })
     pre = _ensure_preproc(cfg_updates, preproc_obj)

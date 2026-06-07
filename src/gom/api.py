@@ -362,7 +362,6 @@ class GoM:
         self._model_config = PreprocessorConfig(**cfg_dict)
 
 
-        print(f"Object detection models: {self._model_config[]}")
         # Initialize preprocessor (loads models)
         self._preprocessor = ImageGraphPreprocessor(self._model_config)
 

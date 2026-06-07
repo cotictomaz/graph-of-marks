@@ -445,8 +445,8 @@ class PreprocessorConfig:
     max_objects_per_question: int = 50  # Maximum objects to retain (performance cap)
 
     # Detection models and confidence thresholds
-    # detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-    detectors_to_use: Tuple[str, ...] = ("yolov8")
+    detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+    # detectors_to_use: Tuple[str, ...] = ("yolov8",)
     # Conservative defaults to reduce false positives and noise
     threshold_owl: float = 0.60  # OWL-ViT confidence threshold
     threshold_yolo: float = 0.85  # YOLOv8 confidence threshold
