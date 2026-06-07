@@ -43,7 +43,7 @@ FINAL_SUMMARY.md
 GOM_FEATURES_SUMMARY.md
 INSTALLATION.md
 
-
+.venv/
 build/lib/
 verification_output/
 gom_intermediate_outputs/

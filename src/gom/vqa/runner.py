@@ -257,7 +257,6 @@ from typing import Any, Dict, List, Optional, Union
 import psutil
 import torch
 
-from .models import HFVLModel, VLLMWrapper
 from .preproc import (
     get_preprocessed_path,
     get_scene_graph_path,
@@ -267,7 +266,7 @@ from .preproc import (
 from .types import VQAExample
 
 # Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
-ModelLike = Union[VLLMWrapper, HFVLModel]
+ModelLike =Any
 
 
 def _should_clear_gpu_cache() -> bool:
@@ -295,6 +294,7 @@ def run_vqa(
     examples: List[VQAExample],
     model: ModelLike,
     *,
+    preprocessor: Optional[Any] = None,
     out_json: str,
     prompt_tpl: str,
     batch_size: int = 1,
@@ -372,10 +372,11 @@ def run_vqa(
                     processed_img = preprocess_for_qa(
                         ex.image_path, ex.question,
                         output_folder=preproc_folder,
-                        apply_question_filter=not disable_q_filter,
+                        # apply_question_filter=not disable_q_filter,
                         cfg_overrides=preproc_cfg,
                         image_dir=image_dir,  
-                        aggressive_pruning=True
+                        # aggressive_pruning=True,
+                        preproc_obj=preprocessor
                     )
                     # Be robust to extension/naming variants.
                     if not os.path.exists(processed_img):

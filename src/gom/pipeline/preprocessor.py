@@ -445,7 +445,8 @@ class PreprocessorConfig:
     max_objects_per_question: int = 50  # Maximum objects to retain (performance cap)
 
     # Detection models and confidence thresholds
-    detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+    # detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
+    detectors_to_use: Tuple[str, ...] = ("yolov8",)
     # Conservative defaults to reduce false positives and noise
     threshold_owl: float = 0.60  # OWL-ViT confidence threshold
     threshold_yolo: float = 0.85  # YOLOv8 confidence threshold
@@ -495,9 +496,9 @@ class PreprocessorConfig:
     max_distance: float = 20000  # Maximum distance for relationship consideration
 
     # SAM segmentation settings
-    sam_version: str = "1"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
+    sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
-    sam_hq_model_type: str = "vit_h"  # SAM-HQ model size
+    sam_hq_model_type: str = "vit_s"  # SAM-HQ model size
     points_per_side: int = 32  # Grid density for automatic mask generation
     pred_iou_thresh: float = 0.88  # Predicted IoU threshold for mask quality
     stability_score_thresh: float = 0.95  # Stability score threshold
@@ -546,6 +547,13 @@ class PreprocessorConfig:
     resolve_overlaps: bool = True  # Auto-adjust overlapping labels
     show_bboxes: bool = True  # Show bounding boxes
     show_confidence: bool = False  # Display confidence scores in labels
+
+    # Auto-scaling for different image sizes/resolutions
+    auto_scale_styles: bool = True
+    style_ref_px: int = 1000  # Reference image size for scaling
+    style_ref_dpi: int = 100  # Reference DPI
+    style_scale_min: float = 0.5  # Minimum scale factor
+    style_scale_max: float = 2.0  # Maximum scale factor
 
     # Mask post-processing
     close_holes: bool = True  # Fill holes in segmentation masks
@@ -779,6 +787,11 @@ class ImageGraphPreprocessor:
                 resolve_overlaps=self.cfg.resolve_overlaps,
                 color_sat_boost=self.cfg.color_sat_boost,
                 color_val_boost=self.cfg.color_val_boost,
+                auto_scale_styles=self.cfg.auto_scale_styles,
+                style_ref_px=self.cfg.style_ref_px,
+                style_ref_dpi=self.cfg.style_ref_dpi,
+                style_scale_min=self.cfg.style_scale_min,
+                style_scale_max=self.cfg.style_scale_max
             )
         )
 
@@ -3668,8 +3681,8 @@ class ImageGraphPreprocessor:
                 boxes, labels, scores, masks, det2_for_mask
             )
             # Post-segmentation deduplication: remove highly overlapping objects
-            print(f"\n[4.5/7] Post-Segmentation Deduplication")
-            print(f"   Checking for overlapping objects...")
+            self.logger.info(f"\n[4.5/7] Post-Segmentation Deduplication")
+            self.logger.info(f"   Checking for overlapping objects...")
             initial_count = len(boxes)
             
             # Pass target_indices to protect singleton targets from removal
@@ -3683,7 +3696,8 @@ class ImageGraphPreprocessor:
                 target_indices=current_target_indices  # Protect targets in singleton mode
             )
             if len(boxes) < initial_count:
-                print(f"   Removed {initial_count - len(boxes)} overlapping objects")
+                self.logger.info(f"   Removed {initial_count - len(boxes)} overlapping objects")
+            
             # CRITICAL: Update singleton target indices after post-segmentation deduplication
             # kept_overlap contains the original indices (w.r.t. boxes before dedup) that were kept.
             if hasattr(self, '_target_object_indices') and getattr(self, '_target_object_indices', None):
@@ -3938,11 +3952,11 @@ class ImageGraphPreprocessor:
         # 6c) Apply singleton filtering AFTER limiting relations per object
         # This ensures we only consider the most important relations when finding connected objects
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
-            print(f"\n[SINGLETON FILTERING] Target + Connected Objects Only (post-relation-filter)")
-            print(f"   Target indices: {sorted(self._target_object_indices)}")
-            print(f"   Target labels: {[labels[i] for i in sorted(self._target_object_indices)]}")
-            print(f"   Total objects before filter: {len(boxes)}")
-            print(f"   Total relations before filter: {len(rels_all) if rels_all else 0}")
+            self.logger.info(f"\n[SINGLETON FILTERING] Target + Connected Objects Only (post-relation-filter)")
+            self.logger.info(f"   Target indices: {sorted(self._target_object_indices)}")
+            self.logger.info(f"   Target labels: {[labels[i] for i in sorted(self._target_object_indices)]}")
+            self.logger.info(f"   Total objects before filter: {len(boxes)}")
+            self.logger.info(f"   Total relations before filter: {len(rels_all) if rels_all else 0}")
             
             # Step 1: Identify connected objects using FILTERED relations (after limit_relationships_per_object)
             # This finds objects connected to target via the TOP relations only
