@@ -501,7 +501,7 @@ class PreprocessorConfig:
     sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
-    sam_hq_model_type: str = "vit_s"  # SAM-HQ model size
+    sam_hq_model_type: str = "vit_b"  # SAM-HQ model size
     points_per_side: int = 32  # Grid density for automatic mask generation
     pred_iou_thresh: float = 0.88  # Predicted IoU threshold for mask quality
     stability_score_thresh: float = 0.95  # Stability score threshold
