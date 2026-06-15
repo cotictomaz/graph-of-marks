@@ -465,6 +465,8 @@ class PreprocessorConfig:
     grounding_dino_text_prompt: Optional[str] = None  # Auto-generated if None
     grounding_dino_text_threshold: float = 0.25  # Text-box alignment threshold
 
+    max_relations: int = 10  # Maximum relationships to extract in an image
+    
     # Per-object relationship limits
     max_relations_per_object: int = 5  # Maximum relationships to extract per object
     min_relations_per_object: int = 1  # Minimum relationships to keep per object
@@ -548,6 +550,10 @@ class PreprocessorConfig:
     resolve_overlaps: bool = True  # Auto-adjust overlapping labels
     show_bboxes: bool = True  # Show bounding boxes
     show_confidence: bool = False  # Display confidence scores in labels
+    color_edge: str = "head"
+    label_bbox_linewidth: float = 3.0
+    relation_label_bbox_linewidth: float = 3.0
+    connector_linewidth: float = 1.5
 
     # Auto-scaling for different image sizes/resolutions
     auto_scale_styles: bool = True
@@ -756,7 +762,8 @@ class ImageGraphPreprocessor:
                 clip_scorer = ClipRelScorer(device=self.device, clip=self.clip)
 
         # Enable Spatial3D reasoning by default if depth estimator is available
-        rels_cfg = RelationsConfig()
+        rels_cfg = RelationsConfig()    
+        rels_cfg.max_relations = self.cfg.max_relations# Added max_relations to the call to be able to do some ablations with this parameter
         # Honor explicit preprocessor flags if present; defer to the
         # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
         # CLI or overrides. Defaults to False.
@@ -787,6 +794,10 @@ class ImageGraphPreprocessor:
                 seg_fill_alpha=self.cfg.seg_fill_alpha,
                 bbox_linewidth=self.cfg.bbox_linewidth,
                 rel_arrow_linewidth=self.cfg.rel_arrow_linewidth,
+                label_bbox_linewidth=self.cfg.label_bbox_linewidth,
+                relation_label_bbox_linewidth=self.cfg.relation_label_bbox_linewidth,
+                connector_linewidth=self.cfg.connector_linewidth,
+                color_edge=self.cfg.color_edge,
                 rel_arrow_mutation_scale=self.cfg.rel_arrow_mutation_scale,
                 resolve_overlaps=self.cfg.resolve_overlaps,
                 color_sat_boost=self.cfg.color_sat_boost,

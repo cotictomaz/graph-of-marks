@@ -105,6 +105,7 @@ class VisualizerConfig:
             label_bbox_linewidth: Line width for object label borders (default: 3.0)
             relation_label_bbox_linewidth: Line width for relation label borders (default: 3.0)
             connector_linewidth: Line width for label-to-object connectors (default: 1.5)
+            color_edge: Determines the color of the edge (default: head)
             
         Relationship Processing:
             filter_redundant_relations: Remove duplicate relationships (default: True)
@@ -180,6 +181,7 @@ class VisualizerConfig:
     label_bbox_linewidth: float = 3.0
     relation_label_bbox_linewidth: float = 3.0
     connector_linewidth: float = 1.5
+    color_edge: str = "head"
 
     # Relation post-processing
     filter_redundant_relations: bool = True
@@ -897,7 +899,15 @@ class Visualizer:
 
             start, end = centers[src], centers[tgt]
             relation_name = str(rel.get("relation", "")).lower()
-            color = colors[src]
+            if cfg.color_edge == "head":
+                color = colors[src]
+            elif cfg.color_edge == "tail":
+                color = colors[src]
+            elif cfg.color_edge == "neutral":
+                color = "#778899"
+            else:
+                print("Error: the color edge configuration parameter is uknown")
+                raise ValueError(f"Color edge configuration parameter can be [head | tail | neutral | semantic] but found: {cfg.color_edge}")
 
             # Adjust curvature for multiple arrows between same objects
             arrow_counts[(src, tgt)] = arrow_counts.get((src, tgt), 0) + 1
