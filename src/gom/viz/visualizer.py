@@ -186,7 +186,7 @@ class VisualizerConfig:
     # Relation post-processing
     filter_redundant_relations: bool = True
     cap_relations_per_object: bool = False
-    max_relations_per_object: int = 1
+    max_relations_per_object: int = 3
     min_relations_per_object: int = 1
 
     # Label content/mode
@@ -902,7 +902,7 @@ class Visualizer:
             if cfg.color_edge == "head":
                 color = colors[src]
             elif cfg.color_edge == "tail":
-                color = colors[src]
+                color = colors[tgt]
             elif cfg.color_edge == "neutral":
                 color = "#778899"
             else:

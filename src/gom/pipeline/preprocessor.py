@@ -470,6 +470,9 @@ class PreprocessorConfig:
     # Per-object relationship limits
     max_relations_per_object: int = 5  # Maximum relationships to extract per object
     min_relations_per_object: int = 1  # Minimum relationships to keep per object
+    cap_relations_per_object: bool = False # Enables min/max capping of the number of relations
+    auto_adjust_relation_cap: bool = True
+
 
     # CLIP embedding cache configuration
     clip_cache_max_age_days: Optional[float] = 30.0  # Disk cache TTL in days
@@ -806,7 +809,9 @@ class ImageGraphPreprocessor:
                 style_ref_px=self.cfg.style_ref_px,
                 style_ref_dpi=self.cfg.style_ref_dpi,
                 style_scale_min=self.cfg.style_scale_min,
-                style_scale_max=self.cfg.style_scale_max
+                style_scale_max=self.cfg.style_scale_max,
+                cap_relations_per_object=self.cfg.cap_relations_per_object,
+                auto_adjust_relation_cap=self.cfg.auto_adjust_relation_cap
             )
         )
 
