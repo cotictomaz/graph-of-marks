@@ -767,6 +767,7 @@ class ImageGraphPreprocessor:
         # Enable Spatial3D reasoning by default if depth estimator is available
         rels_cfg = RelationsConfig()    
         rels_cfg.max_relations = self.cfg.max_relations # Added max_relations to the call to be able to do some ablations with this parameter
+        rels_cfg.auto_adjust_relation_cap = self.cfg.auto_adjust_relation_cap
         # Honor explicit preprocessor flags if present; defer to the
         # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
         # CLI or overrides. Defaults to False.
@@ -811,7 +812,6 @@ class ImageGraphPreprocessor:
                 style_scale_min=self.cfg.style_scale_min,
                 style_scale_max=self.cfg.style_scale_max,
                 cap_relations_per_object=self.cfg.cap_relations_per_object,
-                auto_adjust_relation_cap=self.cfg.auto_adjust_relation_cap
             )
         )
 
