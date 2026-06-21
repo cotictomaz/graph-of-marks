@@ -1160,7 +1160,7 @@ class RelationInferencer:
                 final.extend(q_sorted + other_sorted[:remaining])
 
             # Global filtering - enforcing that no more than max_relations are extracted
-            if getattr(self.config, "ablate_max_global", False) hasattr(self.config, "max_relations"):
+            if getattr(self.config, "ablate_max_global", False) and hasattr(self.config, "max_relations"):
                 global_budget = self.config.max_relations
             
             if global_budget > 0:
