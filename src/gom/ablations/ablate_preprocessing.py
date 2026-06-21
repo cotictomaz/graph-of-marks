@@ -33,7 +33,7 @@ to these shared preprocessed directories. Since inference can be non-determinist
 import os
 from typing import List, Dict, Any, Optional
 
-from ablations.utils import run_preprocessing
+from .utils import run_preprocessing
     
 def generate_ablated_dataset(
     experiment_name: str,
