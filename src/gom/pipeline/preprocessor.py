@@ -2509,7 +2509,7 @@ class ImageGraphPreprocessor:
         filtered_masks = [masks[i] for i in kept_indices] if masks else None
         filtered_depths = [depths[i] for i in kept_indices] if depths else None
         
-        if removed_count > 0:
+        # if removed_count > 0:
             # print(f"  [DEDUP] Removed {removed_count} overlapping objects ({len(boxes)} → {len(filtered_boxes)})")
         
         return filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices
