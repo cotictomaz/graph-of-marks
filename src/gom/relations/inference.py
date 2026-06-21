@@ -1161,7 +1161,7 @@ class RelationInferencer:
 
             # Global filtering - enforcing that no more than max_relations are extracted
             if self.config.get("ablate_max_global", False) and hasattr(self.config, "max_relations"):
-            global_budget = self.config.max_relations
+                global_budget = self.config.max_relations
             
             if global_budget > 0:
                 def global_sort_key(r):
