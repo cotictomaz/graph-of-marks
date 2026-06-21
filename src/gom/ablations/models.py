@@ -1,4 +1,3 @@
-Python
 import os
 import ollama
 from typing import Optional
