@@ -265,7 +265,7 @@ class RelationsConfig:
     check_stability: bool = True
 
     ablate_max_per_object: bool = False
-    ablate_max_global: bool = True
+    ablate_max_global: bool = False
 
 _SPATIAL_KEYS = (
     "left_of",
@@ -1071,7 +1071,7 @@ class RelationInferencer:
             rels_by_src[r["src_idx"]].append(r)
 
         n = len(boxes)
-        if not self.config.get("ablate_max_per_object", False):
+        if not getattr(self.config, "ablate_max_per_object", False):
             max_relations_per_object = self._compute_effective_max_relations_per_object(
                 relationships=relationships,
                 num_objects=n,
@@ -1138,7 +1138,7 @@ class RelationInferencer:
         final: List[dict] = []
         for i, rlist in rels_by_src.items():
             
-            if self.config.get("ablate_max_per_object", False):
+            if getattr(self.config, "ablate_max_per_object", False):
                 # Disattiviamo le euristiche
                 rel_cap = max_relations_per_object
                 rlist_sorted = sorted(rlist, key=rel_sort_key)
@@ -1160,7 +1160,7 @@ class RelationInferencer:
                 final.extend(q_sorted + other_sorted[:remaining])
 
             # Global filtering - enforcing that no more than max_relations are extracted
-            if self.config.get("ablate_max_global", False) and hasattr(self.config, "max_relations"):
+            if getattr(self.config, "ablate_max_global", False) hasattr(self.config, "max_relations"):
                 global_budget = self.config.max_relations
             
             if global_budget > 0:
