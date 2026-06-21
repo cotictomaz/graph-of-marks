@@ -4,8 +4,7 @@ import statistics
 from typing import List, Dict, Any, Optional
 
 # Assicurati di importare i runner e i valutatori corretti
-from gom.vqa.runner import run_vqa
-from gom.vqa.evaluate import evaluate
+from gom.vqa.runner import run_vqa, evaluate
 from .models import OllamaVLM 
 
 def run_ablation_experiments(
