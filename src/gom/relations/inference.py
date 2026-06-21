@@ -1159,18 +1159,18 @@ class RelationInferencer:
                 remaining = max(0, rel_cap - len(q_sorted))
                 final.extend(q_sorted + other_sorted[:remaining])
 
-            # Global filtering - enforcing that no more than max_relations are extracted
-            if getattr(self.config, "ablate_max_global", False) and hasattr(self.config, "max_relations"):
+        # Global filtering - enforcing that no more than max_relations are extracted
+        if getattr(self.config, "ablate_max_global", False) and hasattr(self.config, "max_relations"):
                 global_budget = self.config.max_relations
             
-            if global_budget > 0:
-                def global_sort_key(r):
-                    score = r.get("clip_sim") or r.get("score") or self._get_relation_confidence(r)
-                    return -score if score is not None else 0
-                
-                final = sorted(final, key=global_sort_key)[:global_budget]
-            else:
-                final = []
+                if global_budget > 0:
+                    def global_sort_key(r):
+                        score = r.get("clip_sim") or r.get("score") or self._get_relation_confidence(r)
+                        return -score if score is not None else 0
+                    
+                    final = sorted(final, key=global_sort_key)[:global_budget]
+                else:
+                    final = []
 
         return final
 
