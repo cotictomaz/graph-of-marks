@@ -265,6 +265,7 @@ class RelationsConfig:
     check_stability: bool = True
 
     ablate_max_per_object: bool = False
+    ablate_max_global: bool = True
 
 _SPATIAL_KEYS = (
     "left_of",
@@ -1070,12 +1071,13 @@ class RelationInferencer:
             rels_by_src[r["src_idx"]].append(r)
 
         n = len(boxes)
-        max_relations_per_object = self._compute_effective_max_relations_per_object(
-            relationships=relationships,
-            num_objects=n,
-            max_relations_per_object=max_relations_per_object,
-            question_rel_terms=question_rel_terms,
-        )
+        if not self.config.get("ablate_max_per_object", False):
+            max_relations_per_object = self._compute_effective_max_relations_per_object(
+                relationships=relationships,
+                num_objects=n,
+                max_relations_per_object=max_relations_per_object,
+                question_rel_terms=question_rel_terms,
+            )
         question_subject_idxs = question_subject_idxs or set()
 
         # Guarantee a minimum per object
@@ -1122,66 +1124,54 @@ class RelationInferencer:
             areas.append(max(1.0, float(x2 - x1)) * max(1.0, float(y2 - y1)))
         max_area = max(areas) if areas else 1.0
 
+        # Sort by confidence/score if present, otherwise by distance
+        def rel_sort_key(r):
+            q_priority = 0 if _is_question_rel(r.get("relation", ""), r) else 1
+            rel_priority = self._get_relation_priority(r.get("relation", ""))
+            rel_conf = self._get_relation_confidence(r)
+            score = r.get("clip_sim") or r.get("score")
+            if score is not None:
+                return (q_priority, -rel_priority, -score, r.get("distance", 1e9))
+            else:
+                return (q_priority, -rel_priority, -rel_conf, r.get("distance", 1e9))
+        
         final: List[dict] = []
         for i, rlist in rels_by_src.items():
-            # Shrink cap for small objects to reduce label clutter.
-            rel_cap = max_relations_per_object
             
-            if not self.config.ablate_max_per_object:
-
+            if self.config.get("ablate_max_per_object", False):
+                # Disattiviamo le euristiche
+                rel_cap = max_relations_per_object
+                rlist_sorted = sorted(rlist, key=rel_sort_key)
+                if rel_cap > 0:
+                    final.extend(rlist_sorted[:rel_cap])
+            else:
+                rel_cap = max_relations_per_object
                 if i < len(areas):
-                    area_ratio = float(areas[i] / max_area) if max_area > 0 else 1.0
                     rel_cap = min(rel_cap, 2)
-                # Allow more relations for question target objects.
                 if i in question_subject_idxs:
                     rel_cap = max(rel_cap, 3)
 
-                # Sort by confidence/score if present, otherwise by distance
-                def rel_sort_key(r):
-                    # Priority: question term, then score/confidence, then distance
-                    q_priority = 0 if _is_question_rel(r.get("relation", ""), r) else 1
-                    rel_priority = self._get_relation_priority(r.get("relation", ""))
-                    rel_conf = self._get_relation_confidence(r)
-                    # Use clip_sim, score, or distance
-                    score = r.get("clip_sim", None)
-                    if score is None:
-                        score = r.get("score", None)
-                    if score is not None:
-                        # Negative score for descending order
-                        return (q_priority, -rel_priority, -score, r.get("distance", 1e9))
-                    else:
-                        return (q_priority, -rel_priority, -rel_conf, r.get("distance", 1e9))
                 question_rels = [r for r in rlist if _is_question_rel(r.get("relation", ""), r)]
                 other_rels = [r for r in rlist if not _is_question_rel(r.get("relation", ""), r)]
                 q_sorted = sorted(question_rels, key=rel_sort_key)
                 other_sorted = sorted(other_rels, key=rel_sort_key)
-                if rel_cap > 0:
-                    remaining = rel_cap - len(q_sorted)
-                    if remaining < 0:
-                        remaining = 0
-                else:
-                    remaining = len(other_sorted)
+                
+                remaining = max(0, rel_cap - len(q_sorted))
                 final.extend(q_sorted + other_sorted[:remaining])
+
+            # Global filtering - enforcing that no more than max_relations are extracted
+            if self.config.get("ablate_max_global", False) and hasattr(self.config, "max_relations"):
+            global_budget = self.config.max_relations
+            
+            if global_budget > 0:
+                def global_sort_key(r):
+                    score = r.get("clip_sim") or r.get("score") or self._get_relation_confidence(r)
+                    return -score if score is not None else 0
+                
+                final = sorted(final, key=global_sort_key)[:global_budget]
             else:
-                # Sort by confidence/score if present, otherwise by distance
-                def rel_sort_key(r):
-                    # Priority: question term, then score/confidence, then distance
-                    q_priority = 0 if _is_question_rel(r.get("relation", ""), r) else 1
-                    rel_priority = self._get_relation_priority(r.get("relation", ""))
-                    rel_conf = self._get_relation_confidence(r)
-                    # Use clip_sim, score, or distance
-                    score = r.get("clip_sim", None)
-                    if score is None:
-                        score = r.get("score", None)
-                    if score is not None:
-                        # Negative score for descending order
-                        return (q_priority, -rel_priority, -score, r.get("distance", 1e9))
-                    else:
-                        return (q_priority, -rel_priority, -rel_conf, r.get("distance", 1e9))
-                rlist_sorted = sorted(rlist, key=rel_sort_key)
-                if rel_cap > 0:
-                    final.extend(rlist_sorted[:rel_cap])
-        
+                final = []
+
         return final
 
     def _compute_effective_max_relations_per_object(

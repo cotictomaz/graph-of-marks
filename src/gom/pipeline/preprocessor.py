@@ -604,6 +604,9 @@ class PreprocessorConfig:
     color_sat_boost: float = 1.1  # Saturation boost factor
     color_val_boost: float = 1.1  # Value/brightness boost factor
 
+    ablate_max_global: bool = False
+    ablate_max_per_object: bool = False
+
 
 # ----------------------------- Main Preprocessor Class -----------------------------
 class ImageGraphPreprocessor:
@@ -768,6 +771,8 @@ class ImageGraphPreprocessor:
         rels_cfg = RelationsConfig()    
         rels_cfg.max_relations = self.cfg.max_relations # Added max_relations to the call to be able to do some ablations with this parameter
         rels_cfg.auto_adjust_relation_cap = self.cfg.auto_adjust_relation_cap
+        rels.cfg.ablate_max_global = self.cfg.ablate_max_global
+        rels.cfg.ablate_max_per_object = self.cfg.ablate_max_per_object
         # Honor explicit preprocessor flags if present; defer to the
         # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
         # CLI or overrides. Defaults to False.
@@ -3491,11 +3496,11 @@ class ImageGraphPreprocessor:
         self._singleton_mode_enabled = False
         
         # ALWAYS log to debug - use print() to bypass logger
-        print(f"\n[DEBUG SINGLETON CHECK]")
-        print(f"  Question: '{custom_question or self.cfg.question}'")
-        print(f"  obj_terms: {obj_terms}")
-        print(f"  apply_question_filter: {self.cfg.apply_question_filter}")
-        print(f"  len(labels): {len(labels)}")
+        # print(f"\n[DEBUG SINGLETON CHECK]")
+        # print(f"  Question: '{custom_question or self.cfg.question}'")
+        # print(f"  obj_terms: {obj_terms}")
+        # print(f"  apply_question_filter: {self.cfg.apply_question_filter}")
+        # print(f"  len(labels): {len(labels)}")
         
         if obj_terms and self.cfg.apply_question_filter:
             # Find which object types in detections match the question terms
@@ -3512,11 +3517,11 @@ class ImageGraphPreprocessor:
                         break
             
             # ALWAYS log singleton detection - use print() to bypass logger
-            print(f"\n[SINGLETON DETECTION]")
-            print(f"  Question: '{custom_question or self.cfg.question}'")
-            print(f"  Question terms extracted: {obj_terms}")
-            print(f"  Available labels: {labels[:10]}")
-            print(f"  Matched object types: {mentioned_object_types}")
+            # print(f"\n[SINGLETON DETECTION]")
+            # print(f"  Question: '{custom_question or self.cfg.question}'")
+            # print(f"  Question terms extracted: {obj_terms}")
+            # print(f"  Available labels: {labels[:10]}")
+            # print(f"  Matched object types: {mentioned_object_types}")
             
             # SINGLETON MODE: Exactly ONE object type mentioned
             if len(mentioned_object_types) == 1:
@@ -3534,10 +3539,10 @@ class ImageGraphPreprocessor:
                     self._singleton_mode_enabled = True
                     self._singleton_target_label = target_obj_label
                     
-                    print(f"\n[SINGLETON MODE ACTIVATED]")
-                    print(f"   Target object: '{target_obj_label}'")
-                    print(f"   Found {len(target_indices)} instance(s) at indices {target_indices}")
-                    print(f"   Will filter to: target + connected objects only")
+                    # print(f"\n[SINGLETON MODE ACTIVATED]")
+                    # print(f"   Target object: '{target_obj_label}'")
+                    # print(f"   Found {len(target_indices)} instance(s) at indices {target_indices}")
+                    # print(f"   Will filter to: target + connected objects only")
                     
                     target_object_detected = {
                         'label': target_obj_label,
