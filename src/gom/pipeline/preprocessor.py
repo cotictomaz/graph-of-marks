@@ -771,8 +771,8 @@ class ImageGraphPreprocessor:
         rels_cfg = RelationsConfig()    
         rels_cfg.max_relations = self.cfg.max_relations # Added max_relations to the call to be able to do some ablations with this parameter
         rels_cfg.auto_adjust_relation_cap = self.cfg.auto_adjust_relation_cap
-        rels.cfg.ablate_max_global = self.cfg.ablate_max_global
-        rels.cfg.ablate_max_per_object = self.cfg.ablate_max_per_object
+        rels_cfg.ablate_max_global = self.cfg.ablate_max_global
+        rels_cfg.ablate_max_per_object = self.cfg.ablate_max_per_object
         # Honor explicit preprocessor flags if present; defer to the
         # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
         # CLI or overrides. Defaults to False.
