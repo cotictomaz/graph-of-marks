@@ -257,7 +257,7 @@ from typing import Any, Dict, List, Optional, Union
 import psutil
 import torch
 
-from gom.ablations import (
+from gom.ablations.utils import (
     get_preprocessed_path,
     get_scene_graph_path,
     load_scene_graph,
