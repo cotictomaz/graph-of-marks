@@ -2356,7 +2356,7 @@ class ImageGraphPreprocessor:
                 j_is_target = target_indices is not None and j in target_indices
 
                 if same_class:
-                    print(f"  [DEBUG] Same-class pair: {labels[i]} ({scores[i]:.3f}) vs {labels[j]} ({scores[j]:.3f}), IoU={box_iou:.3f}, threshold={iou_threshold:.3f}, remove? {box_iou >= iou_threshold}")
+                    # print(f"  [DEBUG] Same-class pair: {labels[i]} ({scores[i]:.3f}) vs {labels[j]} ({scores[j]:.3f}), IoU={box_iou:.3f}, threshold={iou_threshold:.3f}, remove? {box_iou >= iou_threshold}")
                 
                 if same_class and box_iou >= iou_threshold:
                     # Same class with high overlap -> keep higher score
@@ -2365,12 +2365,12 @@ class ImageGraphPreprocessor:
                         # i is target -> remove j regardless of score
                         keep.discard(j)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps TARGET {labels[i]}, IoU={box_iou:.3f})")
+                        # print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps TARGET {labels[i]}, IoU={box_iou:.3f})")
                     elif j_is_target and not i_is_target:
                         # j is target -> remove i regardless of score
                         keep.discard(i)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps TARGET {labels[j]}, IoU={box_iou:.3f})")
+                        # print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps TARGET {labels[j]}, IoU={box_iou:.3f})")
                         break
                     elif i_is_target and j_is_target:
                         # Both are targets -> keep both (don't remove)
@@ -2378,11 +2378,11 @@ class ImageGraphPreprocessor:
                     elif scores[i] >= scores[j]:
                         keep.discard(j)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} with IoU={box_iou:.3f})")
+                        # print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} with IoU={box_iou:.3f})")
                     else:
                         keep.discard(i)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} with IoU={box_iou:.3f})")
+                        # print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} with IoU={box_iou:.3f})")
                         break  # i was removed, no need to check more pairs with i
                 
                 elif not same_class and box_iou >= 0.10:
@@ -2493,12 +2493,12 @@ class ImageGraphPreprocessor:
                         if remove_idx == i:
                             keep.discard(i)
                             removed_count += 1
-                            print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} score={scores[j]:.3f}, {reason})")
+                            # print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} score={scores[j]:.3f}, {reason})")
                             break  # i was removed
                         else:
                             keep.discard(j)
                             removed_count += 1
-                            print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} score={scores[i]:.3f}, {reason})")
+                            # print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} score={scores[i]:.3f}, {reason})")
                             break
         
         # Filter to kept indices
@@ -2510,7 +2510,7 @@ class ImageGraphPreprocessor:
         filtered_depths = [depths[i] for i in kept_indices] if depths else None
         
         if removed_count > 0:
-            print(f"  [DEDUP] Removed {removed_count} overlapping objects ({len(boxes)} → {len(filtered_boxes)})")
+            # print(f"  [DEDUP] Removed {removed_count} overlapping objects ({len(boxes)} → {len(filtered_boxes)})")
         
         return filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices
 
