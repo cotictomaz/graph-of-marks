@@ -2355,7 +2355,7 @@ class ImageGraphPreprocessor:
                 i_is_target = target_indices is not None and i in target_indices
                 j_is_target = target_indices is not None and j in target_indices
 
-                if same_class:
+                # if same_class:
                     # print(f"  [DEBUG] Same-class pair: {labels[i]} ({scores[i]:.3f}) vs {labels[j]} ({scores[j]:.3f}), IoU={box_iou:.3f}, threshold={iou_threshold:.3f}, remove? {box_iou >= iou_threshold}")
                 
                 if same_class and box_iou >= iou_threshold:
