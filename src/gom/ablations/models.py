@@ -70,4 +70,4 @@ class OllamaVLM:
             
         except Exception as e:
             print(f"[OllamaVLM Errore] Fallimento durante l'inferenza: {e}")
-            return "Error during inference"
+            return f"Error during inference {e}"
