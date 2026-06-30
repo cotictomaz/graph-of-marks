@@ -3,8 +3,8 @@
 # ==========================================
 base_dir: "/content/drive/MyDrive/BDTM/gablation_studies"
 n_runs: 2
-num_examples: 5         # Metti -1 per usare l'intero dataset
-force_reprocess: false   # Se true, sovrascrive le immagini anche se esistono già
+num_examples: 3         # Metti -1 per usare l'intero dataset
+force_reprocess: true   # Se true, sovrascrive le immagini anche se esistono già
 
 skip_preprocessing: false  # Se true, salta completamente la generazione dei grafi
 run_vlm: true              # Se false, si ferma dopo aver generatato le immagini
@@ -23,17 +23,17 @@ models:
 # ==========================================
 experiments:
   
-  # ablate_edge_thickness:
-  #   ablation_grid:
-  #     rel_arrow_linewidth: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+  ablate_edge_thickness:
+    ablation_grid:
+      rel_arrow_linewidth: [0.5, 3.0]
       
-  # ablate_max_relations_global:
-  #   ablation_grid:
-  #     max_relations: [4, 8, 12, 18, 24, 32]
+  ablate_max_relations_global:
+    ablation_grid:
+      max_relations: [4, 12,]
 
-  # ablate_max_relations_per_object:
-  #   ablation_grid:
-  #     max_relations_per_object: [1, 2, 3, 4, 5, 6]
+  ablate_max_relations_per_object:
+    ablation_grid:
+      max_relations_per_object: [0, 1, 2]
 
   ablate_edge_color:
     ablation_grid:
