@@ -225,9 +225,13 @@ def preprocess_for_qa(
     # Prepare/merge configuration for this run. We overwrite a few fields to ensure
     # in-memory processing and consistent output placement, while honoring caller overrides.
     cfg_updates = dict(cfg_overrides or {})
+    min_relations_per_object = 1
+    if "max_relations_per_object" in cfg_updates.keys() and cfg_updates["max_relations_per_object"] == 0:
+        min_relations_per_object = 0
     cfg_updates.update({
         "input_path": None,                  # in-memory processing instead of directory traversal
         "output_folder": output_folder,
+        "min_relations_per_object": min_relations_per_object,
         # "apply_question_filter": bool(apply_question_filter),
         # "aggressive_pruning": bool(aggressive_pruning),
         "question": question,

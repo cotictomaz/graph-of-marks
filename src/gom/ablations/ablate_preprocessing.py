@@ -31,6 +31,7 @@ to these shared preprocessed directories. Since inference can be non-determinist
 """
 
 import os
+import shutil
 from typing import List, Dict, Any, Optional
 
 from .utils import run_preprocessing

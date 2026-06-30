@@ -1168,7 +1168,7 @@ class RelationInferencer:
                         score = r.get("clip_sim") or r.get("score") or self._get_relation_confidence(r)
                         return -score if score is not None else 0
                     
-                    final = sorted(final, key=global_sort_key)[:global_budget]
+                    final = sorted(final, key=global_sort_key)[:global_budget - 1]
                 else:
                     final = []
 
