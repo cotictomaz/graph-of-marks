@@ -15,7 +15,7 @@ images_dir: "/content/val2014"
 
 # Modelli VLM da confrontare
 models:
-  - "monodream"
+  - "moonodream"
   - "qwen2.5vl:3b"
 
 # ==========================================

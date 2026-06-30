@@ -3746,8 +3746,8 @@ class ImageGraphPreprocessor:
                                 new_target_indices.add(idx)
 
                 self._target_object_indices = new_target_indices
-            else:
-                print(f"   No overlapping objects found")
+            # else:
+            #     print(f"   No overlapping objects found")
         else:
             self.logger.info(f"\n[4/7] Segmentation (SAM)")
             self.logger.info(f"   Skipped (not needed for current config)")

@@ -63,7 +63,10 @@ class OllamaVLM:
 
         try:
             # Chiamata sincrona al server Ollama locale
-            response = ollama.chat(model=self.model_name, messages=messages)
+            response = ollama.chat(model=self.model_name, 
+                                   messages=messages,
+                                   options={ "num_ctx": 8192 }
+                                    )
             
             # Estraiamo e restituiamo solo il testo puro generato
             return response['message']['content']
