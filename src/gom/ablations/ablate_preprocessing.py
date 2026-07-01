@@ -35,6 +35,61 @@ import shutil
 from typing import List, Dict, Any, Optional
 
 from .utils import run_preprocessing
+
+
+def generate_default_dataset(
+    experiment_name: str,
+    examples: List[Any],
+    preproc_obj: Optional[Any] = None,
+    preprocessing_overrides: Optional[Dict[str, Any]] = None,
+    base_dir: str = "ablation_studies",
+    force_reprocess: bool = False,
+) -> None:
+    """
+    Generates a single preprocessed dataset using the default (or lightly overridden) config.
+
+    Unlike generate_ablated_dataset, there is no ablation grid — every image is processed
+    once with a fixed configuration. Artifacts are saved to:
+        {base_dir}/preprocessed_images/{experiment_name}/default/
+
+    Parameters:
+        experiment_name: Name used to locate the output folder (e.g. "vlm_comparison").
+        examples: VQA examples to process.
+        preproc_obj: Optional pre-loaded preprocessor (avoids reloading models).
+        preprocessing_overrides: Config overrides applied on top of whatever base config
+            the preproc_obj was reset to before this call.
+        base_dir: Root directory for all ablation outputs.
+        force_reprocess: If True, deletes and rebuilds an existing folder.
+    """
+    out_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
+
+    if os.path.exists(out_dir):
+        if force_reprocess:
+            print(f"\n  [♻️ FORCE REPROCESS] Clearing existing folder and recomputing: {out_dir}")
+            shutil.rmtree(out_dir)
+            os.makedirs(out_dir)
+        else:
+            if len(os.listdir(out_dir)) > 0:
+                print(f"\n  [⏭️ SKIP] Default dataset already present in {out_dir}. Skipping.")
+                return
+            else:
+                print(f"\n  [▶️ RESUME] Empty folder found at {out_dir}. Starting processing.")
+    else:
+        os.makedirs(out_dir)
+
+    print(f"\n  ↳ 🔧 Processing with default config (overrides: {preprocessing_overrides or {}})")
+    print(f"  ↳ 💾 Saving to: {out_dir}")
+
+    run_preprocessing(
+        examples=examples,
+        preproc_folder=out_dir,
+        preproc_obj=preproc_obj,
+        cfg_overrides=preprocessing_overrides or {},
+        max_imgs=-1,
+        max_qpi=-1,
+    )
+
+    print(f"\n✅ Default dataset generation for {experiment_name} done!")
     
 def generate_ablated_dataset(
     experiment_name: str,
