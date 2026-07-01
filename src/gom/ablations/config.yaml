@@ -2,6 +2,7 @@
 # IMPOSTAZIONI GLOBALI
 # ==========================================
 base_dir: "/content/drive/MyDrive/BDTM/gablation_studies"
+backend: "vllm"   # "ollama" or "vllm"
 n_runs: 2
 num_examples: 3         # Metti -1 per usare l'intero dataset
 force_reprocess: true   # Se true, sovrascrive le immagini anche se esistono già
@@ -13,10 +14,14 @@ questions_path: "/content/MultipleChoice_mscoco_val2014_questions.json"
 annotations_path: "/content/mscoco_val2014_annotations.json"
 images_dir: "/content/val2014"
 
-# Modelli VLM da confrontare
+# Modelli VLM da confrontare - su Ollama
+# models:
+#   - "moondream"
+#   - "qwen2.5vl:3b"
+
+# Modelli VLM da confrontare - su vLLM
 models:
-  - "moondream"
-  - "qwen2.5vl:3b"
+  - "Qwen/Qwen2.5-VL-3B-Instruct"
 
 # ==========================================
 # GLI ESPERIMENTI (Studio Ablativo)

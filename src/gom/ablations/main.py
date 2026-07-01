@@ -121,8 +121,9 @@ def main():
     n_runs = cfg.get("n_runs", 3)
     num_examples = cfg.get("num_examples", -1)
     force_reprocess = cfg.get("force_reprocess", False)
-    skip_preprocessing = cfg.get("skip_preprocessing", False) 
-    run_vlm = cfg.get("run_vlm", True)                        
+    skip_preprocessing = cfg.get("skip_preprocessing", False)
+    run_vlm = cfg.get("run_vlm", True)
+    backend = cfg.get("backend", "ollama")
     models_list = cfg.get("models", [])
     experiments = cfg.get("experiments", {})
     question_path = cfg.get("questions_path")
@@ -200,7 +201,8 @@ def main():
                 multimodal_prompt=multimodal_prompt,
                 system_prompt=system_prompt,
                 n_runs=n_runs,
-                base_dir=base_dir
+                base_dir=base_dir,
+                backend=backend,
             )
 
     print("\n🏁 PIPELINE COMPLETATA CON SUCCESSO! 🏁")

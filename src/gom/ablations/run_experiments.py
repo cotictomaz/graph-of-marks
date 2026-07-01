@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 
 # Assicurati di importare i runner e i valutatori corretti
 from gom.vqa.runner import run_vqa, evaluate
-from .models import OllamaVLM 
+from .models import OllamaVLM, VllmVLM
 
 def run_ablation_experiments(
     experiment_name: str,
@@ -16,7 +16,8 @@ def run_ablation_experiments(
     preprocessor: Any = None,
     system_prompt: str = "",
     n_runs: int = 3,
-    base_dir: str = "ablation_studies"
+    base_dir: str = "ablation_studies",
+    backend: str = "ollama",
 ) -> None:
     """
     Executes the inference and evaluation phase for an ablation study.
@@ -45,8 +46,11 @@ def run_ablation_experiments(
 
     # 1. CICLO ESTERNO: I MODELLI (Ottimizza il caricamento in VRAM)
     for model_name in models_list:
-        print(f"\n🤖 Inizializzazione Modello: {model_name}")
-        current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
+        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend})")
+        if backend == "vllm":
+            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt)
+        else:
+            current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
         safe_model_name = model_name.replace(":", "_")
 
         # 2. CICLO INTERMEDIO: I VALORI ABLATIVI
