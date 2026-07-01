@@ -276,13 +276,38 @@ The [`examples/`](examples/) directory contains:
 ## Docker
 
 ```bash
-# Build the container
+# Build the container (RTX 3090 / Titan Xp nodes)
 docker build -f build/Dockerfile -t gom:latest .
 
+# RTX 5090 nodes need the CUDA 12.8 variant instead
+docker build -f build/Dockerfile.rtx5090 -t gom:latest .
+
 # Run with GPU support
-docker run --rm --gpus all -v $(pwd):/workdir gom:latest \
-    gom-preprocess --input_file data.json
+docker run --rm --gpus all -v $(pwd):/workspace gom:latest \
+    /workspace/train.sh slurm_configs/ablation_experiments.yaml
 ```
+
+### Running the ablation studies on the SLURM cluster
+
+`train.sh`, `run_docker.sh`, and `sbatch_train.sh` at the repository root implement
+the SLURM cluster's recommended container pipeline for `src/gom/ablations/main.py`.
+`run_docker.sh` mounts the project directory plus the shared `/llms` model
+cache (so Hugging Face downloads are reused across users) and forwards its
+argument — a config YAML path — to `train.sh` inside the container, which
+runs `python -m gom.ablations.main --config <path>`.
+
+```bash
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/ablation_experiments.yaml
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/vlm_comparison.yaml
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/prompting_experiments.yaml
+```
+
+See `slurm_configs/*.yaml` for ready-to-edit templates and `sbatch_train.sh` for a
+runnable example. All experiment selection (models, datasets, ablation
+grids, prompting strategies) is controlled entirely by the YAML file — no
+script or image rebuild is needed to change an experiment.
+
+See `sbatch_train.sh` for a ready-to-edit example.
 
 ---
 

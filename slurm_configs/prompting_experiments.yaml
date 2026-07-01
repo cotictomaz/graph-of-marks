@@ -1,0 +1,54 @@
+# Config for `train.sh configs/prompting_experiments.yaml` (see gom.ablations.main).
+# Preprocesses images once with the default config, then evaluates each
+# enabled prompting strategy on every model in `models` (see
+# gom.ablations.run_experiments.run_prompting_experiments and
+# gom.ablations.prompts.build_prompt_template).
+
+# ==========================================
+# Global settings
+# ==========================================
+base_dir: "/workspace/ablation_studies/prompting"
+backend: "vllm"
+n_runs: 3
+num_examples: -1
+force_reprocess: false
+
+questions_path: "/workspace/data/MultipleChoice_mscoco_val2014_questions.json"
+annotations_path: "/workspace/data/mscoco_val2014_annotations.json"
+images_dir: "/workspace/data/val2014"
+
+ablations:
+  enabled: false
+
+vlm_comparison:
+  enabled: false
+
+# ==========================================
+# Prompting techniques experiment
+# ==========================================
+prompting:
+  enabled: true
+  skip_preprocessing: false  # true = images already exist at {base_dir}/preprocessed_images/prompting/default/
+
+  models:
+    - "Qwen/Qwen2.5-VL-7B-Instruct"
+
+  # Optional preprocessing parameter overrides applied on top of the pipeline defaults.
+  preprocessing_overrides: {}
+
+  # Toggle strategies on/off, or tune their parameters (e.g. n_shots).
+  # See src/gom/ablations/prompts.py for the full set of supported strategies
+  # and what each `enabled: true` block accepts.
+  strategies:
+    baseline:
+      enabled: true
+
+    few_shot:
+      enabled: true
+      n_shots: 3
+
+    chain_of_thought:
+      enabled: true
+
+    graph_guided:
+      enabled: true

@@ -1,0 +1,68 @@
+# Config for `train.sh configs/ablation_experiments.yaml` (see gom.ablations.main).
+# Runs the "ablations" phase only: for each experiment below, preprocesses
+# images across an ablation_grid, then evaluates every model in `models` on
+# the resulting images (see gom.ablations.run_experiments.run_ablation_experiments).
+#
+# All paths here are container paths: /workspace is the project directory
+# (bind-mounted by run_docker.sh), /llms is the shared model cache. Put your
+# input dataset files somewhere under /workspace (e.g. /workspace/data/) so
+# they are visible from inside the container.
+
+# ==========================================
+# Global settings
+# ==========================================
+base_dir: "/workspace/ablation_studies/ablations"
+backend: "vllm"       # cluster nodes have no Ollama server running; use vllm
+n_runs: 3
+num_examples: -1      # -1 to use the full dataset
+
+# Set to true only when the ablation_grid or preprocessing pipeline changed
+# since the last run; it overwrites the existing preprocessed images.
+force_reprocess: false
+
+questions_path: "/workspace/data/MultipleChoice_mscoco_val2014_questions.json"
+annotations_path: "/workspace/data/mscoco_val2014_annotations.json"
+images_dir: "/workspace/data/val2014"
+
+# ==========================================
+# Ablation experiments
+# ==========================================
+ablations:
+  enabled: true
+  skip_preprocessing: false  # true = images already exist, skip straight to inference
+  run_vlm: true              # false = stop after preprocessing (useful to inspect images)
+
+  # Add/remove Hugging Face repo IDs to compare more models. Each model is
+  # loaded once into GPU memory (vllm) and reused across all ablation_grid values.
+  models:
+    - "Qwen/Qwen2.5-VL-7B-Instruct"
+
+  # Add, remove, or edit entries here to change which ablations run and over
+  # which values. Each key under `experiments` must match a branch handled
+  # in gom.ablations.main.apply_experiment_config (add a new elif there if
+  # you introduce a new experiment name).
+  experiments:
+
+    ablate_edge_thickness:
+      ablation_grid:
+        rel_arrow_linewidth: [0.5, 3.0]
+
+    ablate_max_relations_global:
+      ablation_grid:
+        max_relations: [4, 12]
+
+    ablate_max_relations_per_object:
+      ablation_grid:
+        max_relations_per_object: [0, 1, 2]
+
+    ablate_edge_color:
+      ablation_grid:
+        edge_color: ["head", "tail", "neutral"]
+
+# Disabled in this config; see configs/vlm_comparison.yaml and
+# configs/prompting_experiments.yaml for the other two experiment types.
+vlm_comparison:
+  enabled: false
+
+prompting:
+  enabled: false

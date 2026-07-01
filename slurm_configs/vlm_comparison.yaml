@@ -1,0 +1,41 @@
+# Config for `train.sh configs/vlm_comparison.yaml` (see gom.ablations.main).
+# Preprocesses images once with the default config (+ optional overrides),
+# then runs every model in `models` on those images to compare VLM accuracy
+# (see gom.ablations.run_experiments.run_vlm_comparison).
+
+# ==========================================
+# Global settings
+# ==========================================
+base_dir: "/workspace/ablation_studies/vlm_comparison"
+backend: "vllm"
+n_runs: 3
+num_examples: -1
+force_reprocess: false
+
+questions_path: "/workspace/data/MultipleChoice_mscoco_val2014_questions.json"
+annotations_path: "/workspace/data/mscoco_val2014_annotations.json"
+images_dir: "/workspace/data/val2014"
+
+ablations:
+  enabled: false
+
+# ==========================================
+# VLM comparison experiment
+# ==========================================
+vlm_comparison:
+  enabled: true
+  skip_preprocessing: false  # true = images already exist at {base_dir}/preprocessed_images/vlm_comparison/default/
+
+  # Add/remove Hugging Face repo IDs here to change which models are compared.
+  models:
+    - "Qwen/Qwen2.5-VL-3B-Instruct"
+    - "Qwen/Qwen2.5-VL-7B-Instruct"
+    - "llava-hf/llava-1.5-7b-hf"
+
+  # Optional preprocessing parameter overrides applied on top of the pipeline
+  # defaults (any field of gom.config.PreprocessorConfig). Leave empty ({})
+  # to use the pipeline defaults unchanged.
+  preprocessing_overrides: {}
+
+prompting:
+  enabled: false

@@ -1,0 +1,65 @@
+# Pinned dependency list used to build the Docker images (build/Dockerfile,
+# build/Dockerfile.rtx5090) deployed on the SLURM cluster, and by
+# `make install_deps`. Kept in sync with the constraints declared in
+# setup.py's core_deps / extras_require; unlike setup.py (a library with
+# loose bounds for pip/PyPI consumers) this file is meant to be reproducible
+# across cluster nodes, per the "SLURM Web Guide" recommendations.
+#
+# NOTE: torch/torchvision are listed here for the standard (RTX 3090 /
+# Titan Xp) image. build/Dockerfile.rtx5090 strips these two lines out and
+# installs matching cu128 wheels separately (see that file for details).
+
+# --- core pipeline dependencies ---
+torch>=2.4.0
+torchvision>=0.19.0
+pillow>=9.5.0
+numpy>=1.24.0,<=2.2.0
+opencv-python>=4.11.0
+transformers>=4.50.0
+networkx>=3.1
+matplotlib>=3.7.0
+tqdm>=4.65.0
+datasets>=3.3.1
+sentence-transformers>=3.4.1
+ensemble-boxes>=1.0.7
+huggingface_hub>=0.31.1
+psutil>=5.9.5
+omegaconf
+pycocotools
+scipy>=1.11.4
+pyyaml
+fvcore>=0.1.5
+iopath>=0.1.7
+hydra-core>=1.3.2
+einops
+timm==0.9.12
+spacy==3.8.4
+nltk==3.9.1
+blis
+colorlog>=6.9.0
+pretty-errors==1.2.25
+sentencepiece==0.2.0
+num2words==0.5.13
+
+# --- detection (make DETECTORS=owlvit,yolov8,detectron2) ---
+ultralytics==8.3.99
+# detectron2 is not on PyPI; installed separately in the Dockerfile via
+# `pip install git+https://github.com/facebookresearch/detectron2.git`
+
+# --- segmentation (make SAM_VERSION=hq, the default) ---
+segment-anything-hq
+
+# --- VQA inference (gom-vqa, scripts/run_vqa_inference.py, USE_VLLM=true) ---
+accelerate==1.4.0
+peft>=0.9.0
+vllm>=0.8.0
+qwen-vl-utils>=0.0.10
+# gom.ablations.models imports both vllm and ollama unconditionally at module
+# level, so both must be installed even when only the vllm backend is used.
+ollama>=0.4.0
+
+# --- visualization (gom.viz.visualizer uses adjustText for label placement) ---
+adjustText==0.8
+
+# --- experiment tracking (recommended by the cluster guide) ---
+wandb>=0.19.0

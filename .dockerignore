@@ -9,3 +9,13 @@
 **/output_images
 *.pt
 **/vqa_v2_val_data
+
+# Not needed inside the Docker build context (only build/requirements.txt,
+# setup.py, MANIFEST.in, README.md, and src/ are COPYd into the image; the
+# rest is provided at runtime via the /workspace bind mount, see run_docker.sh)
+.git
+*.pdf
+paper/
+assets/
+images/
+examples/

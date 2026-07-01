@@ -57,7 +57,15 @@ extras_require = {
     "vqa": [
         "accelerate==1.4.0",
         "peft>=0.9.0",
-        # vllm and ollama removed - users should install their preferred VLM library
+        # vllm is required by scripts/run_vqa_inference.py, scripts/run_ref_inference.py
+        # and gom.vqa/gom.ablations when USE_VLLM=true (see Makefile); ollama users can
+        # skip this extra and install their preferred VLM library instead.
+        "vllm>=0.8.0",
+        "qwen-vl-utils>=0.0.10",
+        # gom.ablations.models imports both vllm and ollama unconditionally at module
+        # level (to expose VllmVLM and OllamaVLM), so both must be installed even if
+        # only one backend is used at runtime.
+        "ollama>=0.4.0",
     ],
     "dev": [
         "pytest>=7.0.0",
