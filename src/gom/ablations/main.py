@@ -5,7 +5,7 @@ import argparse
 
 from .ablate_preprocessing import generate_ablated_dataset, generate_default_dataset
 from .utils import update_cfg_correct
-from .run_experiments import run_ablation_experiments, run_vlm_comparison
+from .run_experiments import run_ablation_experiments, run_vlm_comparison, run_prompting_experiments
 from gom.vqa.runner import VQAExample
 from gom.config import default_config
 
@@ -128,11 +128,19 @@ def main():
     experiments              = ablations_cfg.get("experiments", {})
 
     # --- VLM comparison section ---
-    vlm_comparison_cfg       = cfg.get("vlm_comparison", {})
-    vlm_comparison_enabled   = vlm_comparison_cfg.get("enabled", False)
+    vlm_comparison_cfg          = cfg.get("vlm_comparison", {})
+    vlm_comparison_enabled      = vlm_comparison_cfg.get("enabled", False)
     vlm_comparison_skip_preproc = vlm_comparison_cfg.get("skip_preprocessing", False)
-    vlm_comparison_models    = vlm_comparison_cfg.get("models", [])
+    vlm_comparison_models       = vlm_comparison_cfg.get("models", [])
     vlm_preprocessing_overrides = vlm_comparison_cfg.get("preprocessing_overrides", {}) or {}
+
+    # --- Prompting section ---
+    prompting_cfg           = cfg.get("prompting", {})
+    prompting_enabled       = prompting_cfg.get("enabled", False)
+    prompting_skip_preproc  = prompting_cfg.get("skip_preprocessing", False)
+    prompting_models        = prompting_cfg.get("models", [])
+    prompting_overrides     = prompting_cfg.get("preprocessing_overrides", {}) or {}
+    prompting_strategies    = prompting_cfg.get("strategies", {})
 
     # Shared prompts (identical for both experiment types)
     system_prompt     = "You are a multimodal assistant capable of understanding both visual and textual scene graphs. Use the image and the accompanying graph description to answer the question accurately."
@@ -162,7 +170,8 @@ def main():
     # Initialize the shared preprocessor only when at least one preprocessing phase will run.
     needs_preprocessing = (
         (ablations_enabled and not ablations_skip_preproc) or
-        (vlm_comparison_enabled and not vlm_comparison_skip_preproc)
+        (vlm_comparison_enabled and not vlm_comparison_skip_preproc) or
+        (prompting_enabled and not prompting_skip_preproc)
     )
     if needs_preprocessing:
         print("\n🤖 Inizializzazione del Preprocessor Globale (YOLO)...")
@@ -247,6 +256,39 @@ def main():
             models_list=vlm_comparison_models,
             examples=dataset_examples,
             multimodal_prompt=multimodal_prompt,
+            system_prompt=system_prompt,
+            n_runs=n_runs,
+            base_dir=base_dir,
+            backend=backend,
+        )
+
+    # ==========================================
+    # PROMPTING TECHNIQUES EXPERIMENT
+    # ==========================================
+    if prompting_enabled:
+        print("\n" + "═"*50)
+        print("📝 PROMPTING TECHNIQUES EXPERIMENT")
+        print("═"*50)
+
+        if not prompting_skip_preproc:
+            print("\n[Prompting] Generating default preprocessed images...")
+            preprocessor = apply_experiment_config(preprocessor, "prompting")
+            generate_default_dataset(
+                experiment_name="prompting",
+                examples=dataset_examples,
+                preproc_obj=preprocessor,
+                preprocessing_overrides=prompting_overrides,
+                base_dir=base_dir,
+                force_reprocess=force_reprocess,
+            )
+        else:
+            print("\n⏭️  [Prompting Preprocessing SKIP] Preprocessing skipped by configuration.")
+
+        run_prompting_experiments(
+            experiment_name="prompting",
+            strategies=prompting_strategies,
+            models_list=prompting_models,
+            examples=dataset_examples,
             system_prompt=system_prompt,
             n_runs=n_runs,
             base_dir=base_dir,

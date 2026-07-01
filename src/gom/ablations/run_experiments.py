@@ -224,3 +224,113 @@ def run_vlm_comparison(
             json.dump(summary_stats, f, indent=4)
 
     print("\n✅ VLM comparison inference and evaluation complete!")
+
+
+def run_prompting_experiments(
+    experiment_name: str,
+    strategies: Dict[str, Dict[str, Any]],
+    models_list: List[str],
+    examples: List[Any],
+    system_prompt: str = "",
+    n_runs: int = 3,
+    base_dir: str = "ablation_studies",
+    backend: str = "ollama",
+) -> None:
+    """
+    Runs every enabled prompting strategy against a single set of preprocessed
+    images and records per-run and aggregate metrics.
+
+    The model is initialized once per model name and reused across all strategies,
+    avoiding repeated GPU weight loading for vllm.
+
+    Preprocessed images must already exist at:
+        {base_dir}/preprocessed_images/{experiment_name}/default/
+
+    Results are saved as:
+        {base_dir}/results/{experiment_name}/{strategy}/{model}/run_N/raw_results.json
+        {base_dir}/results/{experiment_name}/{strategy}/{model}/summary_metrics.json
+    """
+    from .prompts import build_prompt_template
+
+    preproc_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
+
+    print("\n" + "="*70)
+    print(f"🚀 AVVIO INFERENZA PROMPTING: {experiment_name}")
+    print("="*70)
+
+    if not os.path.exists(preproc_dir):
+        print(f"  [❌ Error] Preprocessed images not found at: {preproc_dir}")
+        print("  Run with skip_preprocessing: false first, or check your base_dir setting.")
+        return
+
+    enabled_strategies = {
+        name: cfg for name, cfg in strategies.items()
+        if cfg.get("enabled", False)
+    }
+    if not enabled_strategies:
+        print("  [⚠️ Warning] No prompting strategies are enabled. Skipping.")
+        return
+
+    for model_name in models_list:
+        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend})")
+        if backend == "vllm":
+            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt)
+        else:
+            current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
+        safe_model_name = model_name.replace(":", "_")
+
+        for strategy_name, strategy_cfg in enabled_strategies.items():
+            print(f"\n  📝 Strategy: {strategy_name}")
+            prompt_tpl = build_prompt_template(strategy_name, strategy_cfg)
+
+            run_accuracies = []
+            run_exacts = []
+
+            for run_idx in range(1, n_runs + 1):
+                out_run_dir = os.path.join(
+                    base_dir, "results", experiment_name,
+                    strategy_name, safe_model_name, f"run_{run_idx}"
+                )
+                os.makedirs(out_run_dir, exist_ok=True)
+                out_json_path = os.path.join(out_run_dir, "raw_results.json")
+
+                print(f"    🔄 Run {run_idx}/{n_runs}...")
+
+                results = run_vqa(
+                    examples=examples,
+                    model=current_model,
+                    out_json=out_json_path,
+                    prompt_tpl=prompt_tpl,
+                    batch_size=1,
+                    preproc_folder=preproc_dir,
+                    include_scene_graph=True,
+                    inference_image="preprocessed",
+                    skip_preproc=True,
+                )
+
+                metrics = evaluate(results)
+                acc = metrics.get("exact_percent", 0.0)
+                exact = metrics.get("exact", 0)
+                run_accuracies.append(acc)
+                run_exacts.append(exact)
+                print(f"       ↳ Risultato: {acc:.2f}% (Esatti: {exact})")
+
+            summary_stats = {
+                "experiment_name": experiment_name,
+                "strategy": strategy_name,
+                "model_name": model_name,
+                "n_runs": n_runs,
+                "metrics": {
+                    "mean_accuracy": statistics.mean(run_accuracies),
+                    "std_accuracy": statistics.stdev(run_accuracies) if n_runs > 1 else 0.0,
+                    "mean_exact_matches": statistics.mean(run_exacts),
+                },
+            }
+            summary_dir = os.path.join(
+                base_dir, "results", experiment_name, strategy_name, safe_model_name
+            )
+            summary_path = os.path.join(summary_dir, "summary_metrics.json")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary_stats, f, indent=4)
+
+    print("\n✅ Prompting experiments inference and evaluation complete!")

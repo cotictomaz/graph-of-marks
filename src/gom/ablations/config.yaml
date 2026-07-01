@@ -60,3 +60,41 @@ vlm_comparison:
   # Optional preprocessing parameter overrides applied on top of the default config.
   # Leave empty ({}) to use the pipeline defaults unchanged.
   preprocessing_overrides: {}
+
+# ==========================================
+# Prompting techniques experiment
+# ==========================================
+# Preprocesses images once with the default config, then evaluates each enabled
+# prompting strategy on every model in `models`.  The model is initialized once
+# per model name and reused across strategies to avoid repeated GPU loading.
+prompting:
+  enabled: false
+  skip_preprocessing: false  # if true, assumes images already exist in {base_dir}/preprocessed_images/prompting/default/
+
+  models:
+    - "Qwen/Qwen2.5-VL-3B-Instruct"
+
+  # Optional preprocessing parameter overrides applied on top of the default config.
+  preprocessing_overrides: {}
+
+  strategies:
+    # Current static prompt — included for a fair in-experiment baseline.
+    baseline:
+      enabled: true
+
+    # Prepend n_shots textual examples before the question (no images).
+    # Format: EXAMPLE N: CONTEXT: ... QUESTION: ... ANSWER: ...
+    # Maximum n_shots is 6 (size of the built-in pool).
+    few_shot:
+      enabled: true
+      n_shots: 3
+
+    # Instruct the model to reason step by step, then emit "Answer: [short answer]".
+    # Compatible with the existing answer parser (rsplit on the last "Answer:").
+    chain_of_thought:
+      enabled: true
+
+    # Explicitly instruct the model to identify relevant objects and relations
+    # from the scene graph before giving a concise answer.
+    graph_guided:
+      enabled: true
