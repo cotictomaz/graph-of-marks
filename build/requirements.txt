@@ -1,42 +1,54 @@
 # Pinned dependency list used to build the Docker images (build/Dockerfile,
 # build/Dockerfile.rtx5090) deployed on the SLURM cluster, and by
-# `make install_deps`. Kept in sync with the constraints declared in
-# setup.py's core_deps / extras_require; unlike setup.py (a library with
-# loose bounds for pip/PyPI consumers) this file is meant to be reproducible
-# across cluster nodes, per the "SLURM Web Guide" recommendations.
+# `make install_deps`. Every version below was verified with `pip install
+# --dry-run -r build/requirements.txt` (and, for build/Dockerfile, a full
+# `docker build`) to resolve cleanly with no conflicts, so this file is
+# reproducible across cluster nodes/builds, per the "SLURM Web Guide"
+# recommendation to pin exact versions. Do not loosen a pin without
+# re-verifying the full set resolves (see README_SLURM.md's troubleshooting
+# note on ResolutionImpossible errors if you do change something here).
 #
-# NOTE: torch/torchvision are listed here for the standard (RTX 3090 /
-# Titan Xp) image. build/Dockerfile.rtx5090 strips these two lines out and
-# installs matching cu128 wheels separately (see that file for details).
+# torch/torchvision/torchaudio are pinned to the exact versions vllm==0.8.5
+# requires (cu124 wheels: nvidia-cublas-cu12==12.4.5.8 etc., bundled by pip
+# independently of the base image's system CUDA toolkit). This is
+# deliberately an older, more driver-compatible combo than whatever `>=`
+# floors would otherwise resolve to unconstrained (which drifted to
+# torch 2.11/cu13 wheels needing a very recent NVIDIA driver).
+#
+# NOTE: torch/torchvision/torchaudio are listed here for the standard
+# (RTX 3090 / Titan Xp) image. build/Dockerfile.rtx5090 strips these three
+# lines out and installs matching cu128 wheels separately (see that file).
 
 # --- core pipeline dependencies ---
-torch>=2.4.0
-torchvision>=0.19.0
-pillow>=9.5.0
-numpy>=1.24.0,<=2.2.0
-opencv-python>=4.11.0
-transformers>=4.50.0
-networkx>=3.1
-matplotlib>=3.7.0
-tqdm>=4.65.0
-datasets>=3.3.1
-sentence-transformers>=3.4.1
-ensemble-boxes>=1.0.7
-huggingface_hub>=0.31.1
-psutil>=5.9.5
-omegaconf
-pycocotools
-scipy>=1.11.4
-pyyaml
-fvcore>=0.1.5
-iopath>=0.1.7
-hydra-core>=1.3.2
-einops
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+pillow==11.1.0
+numpy==2.1.1
+opencv-python==4.11.0.86
+transformers==4.51.3
+tokenizers==0.21.4
+networkx==3.4.2
+matplotlib==3.10.1
+tqdm==4.67.1
+datasets==3.3.2
+sentence-transformers==3.4.1
+ensemble-boxes==1.0.9
+huggingface_hub==0.36.2
+psutil==5.9.8
+omegaconf==2.3.0
+pycocotools==2.0.8
+scipy==1.15.2
+pyyaml==6.0.2
+fvcore==0.1.5.post20221221
+iopath==0.1.10
+hydra-core==1.3.2
+einops==0.8.1
 timm==0.9.12
 spacy==3.8.4
 nltk==3.9.1
-blis
-colorlog>=6.9.0
+blis==1.2.1
+colorlog==6.9.0
 pretty-errors==1.2.25
 sentencepiece==0.2.0
 num2words==0.5.13
@@ -45,21 +57,23 @@ num2words==0.5.13
 ultralytics==8.3.99
 # detectron2 is not on PyPI; installed separately in the Dockerfile via
 # `pip install git+https://github.com/facebookresearch/detectron2.git`
+# (unpinned upstream ref — detectron2 has no tagged PyPI releases to pin to;
+# verified to build against torch==2.6.0 in build/Dockerfile).
 
 # --- segmentation (make SAM_VERSION=hq, the default) ---
-segment-anything-hq
+segment-anything-hq==0.3
 
 # --- VQA inference (gom-vqa, scripts/run_vqa_inference.py, USE_VLLM=true) ---
 accelerate==1.4.0
-peft>=0.9.0
-vllm>=0.8.0
-qwen-vl-utils>=0.0.10
+peft==0.19.1
+vllm==0.8.5
+qwen-vl-utils==0.0.14
 # gom.ablations.models imports both vllm and ollama unconditionally at module
 # level, so both must be installed even when only the vllm backend is used.
-ollama>=0.4.0
+ollama==0.4.8
 
 # --- visualization (gom.viz.visualizer uses adjustText for label placement) ---
 adjustText==0.8
 
 # --- experiment tracking (recommended by the cluster guide) ---
-wandb>=0.19.0
+wandb==0.19.8
