@@ -6,7 +6,7 @@ n_runs: 2
 num_examples: 3         # Metti -1 per usare l'intero dataset
 force_reprocess: true   # Se true, sovrascrive le immagini anche se esistono già
 
-skip_preprocessing: false  # Se true, salta completamente la generazione dei grafi
+skip_preprocessing: true  # Se true, salta completamente la generazione dei grafi
 run_vlm: true              # Se false, si ferma dopo aver generatato le immagini
 
 questions_path: "/content/MultipleChoice_mscoco_val2014_questions.json"
@@ -15,7 +15,7 @@ images_dir: "/content/val2014"
 
 # Modelli VLM da confrontare
 models:
-  - "moonodream"
+  - "moondream"
   - "qwen2.5vl:3b"
 
 # ==========================================
