@@ -174,8 +174,7 @@ def main():
         (prompting_enabled and not prompting_skip_preproc)
     )
     if needs_preprocessing:
-        print("\n🤖 Inizializzazione del Preprocessor Globale (YOLO)...")
-        preprocessor = update_cfg_correct({"detectors_to_use": ("yolov8",)})
+        preprocessor = update_cfg_correct()
     else:
         preprocessor = None
 

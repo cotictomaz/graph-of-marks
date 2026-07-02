@@ -461,7 +461,7 @@ class PreprocessorConfig:
     
     # GroundingDINO detector (SOTA open-vocabulary detection)
     threshold_grounding_dino: float = 0.35  # Lower threshold due to better precision
-    grounding_dino_model: str = "tiny"  # Model size: "tiny", "base", "large"
+    grounding_dino_model: str = "base"  # Model size: "tiny", "base", "large"
     grounding_dino_text_prompt: Optional[str] = None  # Auto-generated if None
     grounding_dino_text_threshold: float = 0.25  # Text-box alignment threshold
 
@@ -504,7 +504,7 @@ class PreprocessorConfig:
     sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
-    sam_hq_model_type: str = "vit_b"  # SAM-HQ model size
+    sam_hq_model_type: str = "vit_h"  # SAM-HQ model size
     points_per_side: int = 32  # Grid density for automatic mask generation
     pred_iou_thresh: float = 0.88  # Predicted IoU threshold for mask quality
     stability_score_thresh: float = 0.95  # Stability score threshold
