@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
+**The user's primary focus in this repository is `src/gom/ablations/` — the ablation studies experiments (grid ablations, VLM comparison, prompting strategies) and the SLURM/Docker infrastructure used to run them on the cluster.** Prioritize that directory and its supporting `slurm_configs/*.yaml`, `build/`, and SLURM scripts when interpreting ambiguous requests; see the dedicated sections below for both.
+
 **Graph of Marks (GoM)** is a visual prompting framework (AAAI 2026) that transforms images into structured semantic graphs. It chains object detection → fusion → segmentation → depth estimation → relationship extraction → scene graph generation → visualization into a single pipeline, producing annotated images and structured scene graph text for multimodal LLMs.
 
 ## Commands
@@ -177,6 +179,19 @@ run time. So a rebuild is only needed for actual dependency/environment
 changes (edits to `build/Dockerfile*` or `build/requirements.txt`), never for
 ordinary `src/gom/**` or `slurm_configs/*.yaml` edits — `git pull` + `sbatch`
 is enough.
+
+### Last verified build state
+
+As of 2026-07-02, `docker build -f build/Dockerfile -t gom:latest .` (the
+standard RTX 3090 / Titan Xp image) builds cleanly end to end on the pinned
+`build/requirements.txt` set: dependency install, the from-source
+`detectron2` build, and the spaCy/NLTK model downloads all complete without
+conflicts, and the final `pip install --no-deps -e .` registers `gom`
+1.1.0 correctly. Sanity-checked with `docker run --rm gom:latest python3 -m
+gom.ablations.main --help`, which prints the CLI usage as expected (the
+"NVIDIA Driver was not detected" / vLLM CUDA-import warnings are expected on
+a machine with no GPU, e.g. a local build/test machine, and are not build
+failures). `build/Dockerfile.rtx5090` was not re-verified in this pass.
 
 ## Legacy / Reference Files
 
