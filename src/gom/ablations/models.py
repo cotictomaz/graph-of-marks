@@ -2,7 +2,32 @@ import os
 import base64
 import ollama
 import vllm
-from typing import Optional
+from typing import Optional, Tuple, Union, Dict, Any
+
+
+def parse_model_entry(entry: Union[str, Dict[str, Any]]) -> Tuple[str, bool]:
+    """
+    Normalize one ``models:`` list entry into ``(model_name, quantize_fp8)``.
+
+    An entry may be either:
+      * a plain string  -> ``"repo/id"``                       (bf16, no quantization)
+      * a mapping       -> ``{name: "repo/id", fp8: true}``    (load with FP8 quantization)
+
+    The mapping form lets a config decide FP8 *per model* (e.g. to make a ~12B
+    model fit on a 24GB card while leaving smaller models in bf16). ``model`` is
+    accepted as an alias for ``name``, and ``quantize_fp8`` for ``fp8``.
+    """
+    if isinstance(entry, str):
+        return entry, False
+    if isinstance(entry, dict):
+        name = entry.get("name") or entry.get("model")
+        if not name:
+            raise ValueError(f"Model entry {entry!r} is missing a 'name' (or 'model') key.")
+        fp8 = bool(entry.get("fp8", entry.get("quantize_fp8", False)))
+        return name, fp8
+    raise ValueError(
+        f"Unsupported model entry {entry!r}: expected a string or a mapping with a 'name' key."
+    )
 
 
 class OllamaVLM:
@@ -54,7 +79,12 @@ class VllmVLM:
     then fast for repeated generate() calls).
     """
 
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct", system_prompt: str = ""):
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+        system_prompt: str = "",
+        quantize_fp8: bool = False,
+    ):
         try:
             from vllm import LLM, SamplingParams
         except ImportError as e:
@@ -62,8 +92,18 @@ class VllmVLM:
 
         self.model_name = model_name
         self.system_prompt = system_prompt
-        print(f"[VllmVLM] Loading model: {self.model_name}")
-        self.llm = LLM(model=self.model_name)
+        self.quantize_fp8 = quantize_fp8
+
+        # Build the LLM kwargs; only add `quantization` when FP8 is requested so
+        # bf16 loads (the default) behave exactly as before. On-the-fly FP8
+        # roughly halves the weight footprint (e.g. a ~12B model ~24GB -> ~13GB),
+        # letting it fit on a single 24GB GPU with negligible accuracy loss.
+        llm_kwargs: Dict[str, Any] = {"model": self.model_name}
+        if quantize_fp8:
+            llm_kwargs["quantization"] = "fp8"
+
+        print(f"[VllmVLM] Loading model: {self.model_name}" + (" (fp8)" if quantize_fp8 else ""))
+        self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(max_tokens=512, temperature=0.0)
         print(f"[VllmVLM] Model loaded: {self.model_name}")
 

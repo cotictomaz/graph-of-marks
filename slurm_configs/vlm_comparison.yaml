@@ -12,9 +12,18 @@ n_runs: 3
 num_examples: -1
 force_reprocess: false
 
-questions_path: "/workspace/data/MultipleChoice_mscoco_val2014_questions.json"
-annotations_path: "/workspace/data/mscoco_val2014_annotations.json"
-images_dir: "/workspace/data/val2014"
+# Single flat VQAv1 JSON (list of {image_path, question, answers}).
+dataset_path: "/workspace/vqav1_limited_1000.json"
+
+# --- Image location (see README_SLURM.md §"Images live only on node 40") ---
+# On node 40 (faretra), the images live locally: point images_dir at them and
+# leave images_base_url empty — no downloads happen.
+# On every OTHER node, leave images_dir as-is (it simply won't exist there) and
+# set images_base_url to node 40's HTTP image server; each image is fetched once
+# into image_cache_dir and reused thereafter.
+images_dir: "/workspace/data/train2014"
+images_base_url: ""            # e.g. "http://137.204.107.40:8000" when running off node 40
+image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (must be under /workspace)
 
 ablations:
   enabled: false
@@ -27,10 +36,14 @@ vlm_comparison:
   skip_preprocessing: false  # true = images already exist at {base_dir}/preprocessed_images/vlm_comparison/default/
 
   # Add/remove Hugging Face repo IDs here to change which models are compared.
+  # An entry may be a plain string (loaded in bf16) or a mapping with `fp8: true`
+  # to FP8-quantize that model on load (see gom.ablations.models.parse_model_entry).
   models:
-    - "Qwen/Qwen2.5-VL-3B-Instruct"
-    - "Qwen/Qwen2.5-VL-7B-Instruct"
-    - "llava-hf/llava-1.5-7b-hf"
+    - "omkarthawakar/LlamaV-o1"          # retained paper anchor (reasoning model; best in their Table 2)
+    - "Qwen/Qwen3-VL-8B-Instruct"        # successor to the paper's Qwen2.5-VL-7B (newest generation); bf16-safe on 24GB
+    - "OpenGVLab/InternVL3_5-8B"         # strong, distinct architecture lineage (ViT–MLP–LLM); bf16-safe on 24GB
+    - name: "google/gemma-4-12B-it"      # successor slot to the paper's Gemma-3-4B; ~size peer of LlamaV-o1
+      fp8: true                          # ~24GB in bf16 → FP8 (~13GB) so it fits a 24GB card (drop for the 5090)
 
   # Optional preprocessing parameter overrides applied on top of the pipeline
   # defaults (any field of gom.config.PreprocessorConfig). Leave empty ({})

@@ -129,7 +129,7 @@ paper's ablation studies. Entry point: `python -m gom.ablations.main --config
 | `src/gom/ablations/main.py` | CLI entry point; loads YAML, builds the VQA dataset, dispatches to the three experiment types below |
 | `src/gom/ablations/ablate_preprocessing.py` | `generate_ablated_dataset` / `generate_default_dataset` — pre-renders GoM images once per config, cached on disk (skipped on rerun unless `force_reprocess: true`) |
 | `src/gom/ablations/run_experiments.py` | `run_ablation_experiments`, `run_vlm_comparison`, `run_prompting_experiments` — loads each model once, runs `n_runs` repeats, writes `summary_metrics.json` (mean/std) per config |
-| `src/gom/ablations/models.py` | `OllamaVLM` / `VllmVLM` wrappers; **imports both `ollama` and `vllm` unconditionally at module level**, so both packages must be installed regardless of which `backend` a config selects |
+| `src/gom/ablations/models.py` | `OllamaVLM` / `VllmVLM` wrappers + `parse_model_entry`; **imports both `ollama` and `vllm` unconditionally at module level**, so both packages must be installed regardless of which `backend` a config selects. `VllmVLM(quantize_fp8=True)` passes `quantization="fp8"` to vLLM (on-the-fly FP8, ~halves the weight footprint; bf16 path unchanged when `False`). `parse_model_entry` normalizes each `models:` list item to `(name, quantize_fp8)` — see per-model FP8 below |
 | `src/gom/ablations/prompts.py` | `build_prompt_template` — the four prompting strategies (`baseline`, `few_shot`, `chain_of_thought`, `graph_guided`); add a new strategy here first, then reference it by name in a config's `strategies:` block |
 | `src/gom/ablations/utils.py` | `update_cfg_correct` (in-place `PreprocessorConfig` patching to avoid reloading models), `run_preprocessing` |
 
@@ -155,6 +155,78 @@ Results always land under `{base_dir}/results/...` as `summary_metrics.json`
 (aggregate) plus one `raw_results.json` per run; preprocessed images live
 under `{base_dir}/preprocessed_images/...` and are reused across reruns
 unless `force_reprocess: true`.
+
+**Per-model FP8 (`models:` entry schema).** Each item in any `models:` list may
+be **either** a plain string (`"repo/id"`, loaded in bf16) **or** a mapping
+`{name: "repo/id", fp8: true}` that FP8-quantizes *that model* on load
+(`model` is an alias for `name`, `quantize_fp8` for `fp8`). This lets a single
+config keep small models in bf16 while quantizing a large one to fit 24 GB —
+e.g. `google/gemma-4-12B-it` is ~24 GB in bf16 (too tight for a 3090 with KV
+cache) but ~13 GB in FP8. FP8 is a no-op on the `ollama` backend (warned and
+ignored). Parsed by `gom.ablations.models.parse_model_entry`.
+
+**Model selection (this study's choices; VQA only, no REC).** The paper used
+Qwen-2.5-VL-7B / Gemma-3-4B / LlamaV-o1-11B. The current configs extend along
+generation, scale, architecture, and reasoning axes:
+- **`vlm_comparison`** — `LlamaV-o1` (retained paper anchor) + newest-gen
+  `Qwen3-VL-8B-Instruct` and `google/gemma-4-12B-it` (FP8) + `InternVL3_5-8B`
+  (distinct ViT–MLP–LLM lineage). Tests whether GoM still helps two-generations-newer and different-architecture models.
+- **`ablation_experiments`** — `LlamaV-o1` anchor + `Qwen3-VL-4B` and
+  `Qwen3-VL-8B` (same family, two sizes → is drawn-mark sensitivity
+  scale-dependent?). Kept bf16-safe to keep the big grid cheap.
+- **`prompting_experiments`** — `Qwen3-VL-8B-Instruct` vs `Qwen3-VL-8B-Thinking`
+  (reasoning off/on, identical weights) + `LlamaV-o1`, to isolate how
+  CoT/graph_guided prompting interacts with native reasoning.
+
+Note: there is **no** `Qwen3.5-VL` (Qwen3.5 is text-only); `Qwen3-VL` is the
+current multimodal Qwen. **Reasoning/Thinking models emit reasoning tokens
+before the answer**, but `gom.vqa.runner.evaluate` does string exact-match — so
+LlamaV-o1 and any `*-Thinking` model need answer extraction or their scores are
+understated; verify this before trusting those runs.
+
+### Data loading — how the VQA examples are built (`main.py::build_vqa_examples`)
+
+The dataset is a **single flat JSON list** (`dataset_path`, e.g.
+`vqav1_limited_1000.json`): each record is
+`{"image_path": "<basename>.jpg", "question": "...", "answers": [<10 strings>]}`.
+The current file holds 3000 records = 1000 unique images × 3 questions each,
+with `COCO_train2014_*` basenames. There is **no** separate
+questions/annotations file and no `question_id`/`image_id` — this replaced an
+older two-file VQAv2-style format, so ignore any lingering references to
+`questions_path`/`annotations_path`/`multiple_choice_answer`.
+
+`build_vqa_examples(dataset_path, images_dir, images_base_url, image_cache_dir)`
+turns each record into a `gom.vqa.types.VQAExample`:
+
+- **`answer`** = VQA-style **majority vote** over the 10 `answers`
+  (`_majority_answer`, ties → first occurrence), because the evaluator
+  `gom.vqa.runner.evaluate` does a single-string case-insensitive exact match.
+  The full list is preserved in `metadata["answers"]` for richer scoring later.
+- **`image_id`** = filename stem (e.g. `COCO_train2014_000000487025`); used to
+  count unique images and to apply `num_examples` (which subsamples by unique
+  image, keeping all questions of the chosen images).
+- **`metadata`** = `{"answers": [...], "image_file": <basename>, "dataset": "vqav1"}`.
+- **`image_path`** = a **resolved local absolute path** (see below), so every
+  downstream stage (basename+question-hash preprocessing caches, image
+  grouping, `evaluate`) is oblivious to where the image came from.
+
+**Image resolution / the node-40 problem** (`_resolve_local_image`): the JSON
+stores only basenames, and the actual `.jpg` files live **only on node 40
+(faretra)** with no shared filesystem across cluster nodes. For each unique
+image (resolved once per run and memoized), it tries in order: (1)
+`images_dir/<basename>` if it exists locally (the node-40 case → no download);
+(2) `image_cache_dir/<basename>` if already fetched; (3) download
+`images_base_url/<basename>` into `image_cache_dir` (atomic `.part` rename,
+retries with exponential backoff, via `requests`). Missing/undownloadable
+images are skipped with a warning; an all-missing run raises. Config knobs:
+`images_dir` (local dir, used on node 40), `images_base_url` (empty on node 40;
+`http://137.204.107.40:8000` elsewhere), `image_cache_dir` (default
+`{base_dir}/image_cache`, must stay under the bind-mounted `/workspace`). This
+is what lets the same config run on **any** SLURM-selected node — node 40 reads
+local files, every other node fetches over HTTP from node 40's
+`python3 -m http.server`. Full operational writeup in `README_SLURM.md` §2.1.
+No Docker change is needed (default bridge networking reaches node 40;
+`requests` is already installed).
 
 ## Docker / SLURM Cluster Setup
 

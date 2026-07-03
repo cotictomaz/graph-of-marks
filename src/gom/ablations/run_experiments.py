@@ -5,7 +5,8 @@ from typing import List, Dict, Any, Optional
 
 # Assicurati di importare i runner e i valutatori corretti
 from gom.vqa.runner import run_vqa, evaluate
-from .models import OllamaVLM, VllmVLM
+from .models import OllamaVLM, VllmVLM, parse_model_entry
+from .logging_utils import get_logger
 
 def run_ablation_experiments(
     experiment_name: str,
@@ -37,19 +38,28 @@ def run_ablation_experiments(
                         run_2/
                             raw_results.json
     """
+    logger = get_logger()
     keys = list(ablation_grid.keys())
     value_lists = list(ablation_grid.values())
-    
+
     print("\n" + "="*70)
     print(f"🚀 AVVIO INFERENZA: {experiment_name}")
     print("="*70)
+    logger.info(
+        "[inference:%s] started — %d model(s), backend=%s, n_runs=%d, %d examples",
+        experiment_name, len(models_list), backend, n_runs, len(examples),
+    )
 
     # 1. CICLO ESTERNO: I MODELLI (Ottimizza il caricamento in VRAM)
-    for model_name in models_list:
-        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend})")
+    for model_entry in models_list:
+        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
+        logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt)
+            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
         else:
+            if quantize_fp8:
+                logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)
             current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
         safe_model_name = model_name.replace(":", "_")
 
@@ -69,10 +79,18 @@ def run_ablation_experiments(
             
             if not os.path.exists(preproc_dir):
                 print(f"  [⚠️ Warning] Cartella {preproc_dir} non trovata. Salto questa configurazione.")
+                logger.warning(
+                    "[inference:%s] model '%s' — preprocessed folder not found: %s (skipping config %s)",
+                    experiment_name, model_name, preproc_dir, current_overrides,
+                )
                 continue
-                
+
             print(f"\n  📐 Parametri: {current_overrides}")
             print(f"  📂 Leggo le immagini da: {preproc_dir}")
+            logger.info(
+                "[inference:%s] model '%s' — config %s (images from %s)",
+                experiment_name, model_name, current_overrides, preproc_dir,
+            )
 
             run_accuracies = []
             run_exacts = []
@@ -86,7 +104,11 @@ def run_ablation_experiments(
                 out_json_path = os.path.join(out_run_dir, "raw_results.json")
                 
                 print(f"    🔄 Run {run_idx}/{n_runs}...")
-                
+                logger.info(
+                    "[inference:%s] model '%s' config %s — run %d/%d starting",
+                    experiment_name, model_name, current_overrides, run_idx, n_runs,
+                )
+
                 # --- IL CUORE DELLA FASE 2 ---
                 # Chiamiamo run_vqa forzandolo a saltare la generazione grafica
                 results = run_vqa(
@@ -111,6 +133,10 @@ def run_ablation_experiments(
                 run_accuracies.append(acc)
                 run_exacts.append(exact)
                 print(f"       ↳ Risultato: {acc:.2f}% (Esatti: {exact})")
+                logger.info(
+                    "[inference:%s] model '%s' config %s — run %d/%d: acc=%.2f%% exact=%d",
+                    experiment_name, model_name, current_overrides, run_idx, n_runs, acc, exact,
+                )
 
             # 4. AGGREGAZIONE E SALVATAGGIO SUMMARY JSON
             summary_stats = {
@@ -131,8 +157,18 @@ def run_ablation_experiments(
             
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary_stats, f, indent=4)
-                
+
+            logger.info(
+                "[inference:%s] model '%s' config %s — SUMMARY: mean_acc=%.2f%% std_acc=%.2f mean_exact=%.2f → %s",
+                experiment_name, model_name, current_overrides,
+                summary_stats["metrics"]["mean_accuracy"],
+                summary_stats["metrics"]["std_accuracy"],
+                summary_stats["metrics"]["mean_exact_matches"],
+                summary_path,
+            )
+
     print("\n✅ Tutte le inferenze e le valutazioni completate!")
+    logger.info("[inference:%s] all inference and evaluation complete.", experiment_name)
 
 
 def run_vlm_comparison(
@@ -157,22 +193,32 @@ def run_vlm_comparison(
         {base_dir}/results/{experiment_name}/{model_name}/run_N/raw_results.json
         {base_dir}/results/{experiment_name}/{model_name}/summary_metrics.json
     """
+    logger = get_logger()
     preproc_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
 
     print("\n" + "="*70)
     print(f"🚀 AVVIO INFERENZA VLM COMPARISON: {experiment_name}")
     print("="*70)
+    logger.info(
+        "[inference:%s] VLM comparison started — %d model(s), backend=%s, n_runs=%d, %d examples",
+        experiment_name, len(models_list), backend, n_runs, len(examples),
+    )
 
     if not os.path.exists(preproc_dir):
         print(f"  [❌ Error] Preprocessed images not found at: {preproc_dir}")
         print("  Run with skip_preprocessing: false first, or check your base_dir setting.")
+        logger.error("[inference:%s] preprocessed images not found at %s — aborting.", experiment_name, preproc_dir)
         return
 
-    for model_name in models_list:
-        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend})")
+    for model_entry in models_list:
+        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
+        logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt)
+            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
         else:
+            if quantize_fp8:
+                logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)
             current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
         safe_model_name = model_name.replace(":", "_")
 
@@ -187,6 +233,7 @@ def run_vlm_comparison(
             out_json_path = os.path.join(out_run_dir, "raw_results.json")
 
             print(f"    🔄 Run {run_idx}/{n_runs}...")
+            logger.info("[inference:%s] model '%s' — run %d/%d starting", experiment_name, model_name, run_idx, n_runs)
 
             results = run_vqa(
                 examples=examples,
@@ -207,6 +254,10 @@ def run_vlm_comparison(
             run_accuracies.append(acc)
             run_exacts.append(exact)
             print(f"       ↳ Risultato: {acc:.2f}% (Esatti: {exact})")
+            logger.info(
+                "[inference:%s] model '%s' — run %d/%d: acc=%.2f%% exact=%d",
+                experiment_name, model_name, run_idx, n_runs, acc, exact,
+            )
 
         summary_stats = {
             "experiment_name": experiment_name,
@@ -223,7 +274,17 @@ def run_vlm_comparison(
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary_stats, f, indent=4)
 
+        logger.info(
+            "[inference:%s] model '%s' — SUMMARY: mean_acc=%.2f%% std_acc=%.2f mean_exact=%.2f → %s",
+            experiment_name, model_name,
+            summary_stats["metrics"]["mean_accuracy"],
+            summary_stats["metrics"]["std_accuracy"],
+            summary_stats["metrics"]["mean_exact_matches"],
+            summary_path,
+        )
+
     print("\n✅ VLM comparison inference and evaluation complete!")
+    logger.info("[inference:%s] VLM comparison complete.", experiment_name)
 
 
 def run_prompting_experiments(
@@ -252,15 +313,21 @@ def run_prompting_experiments(
     """
     from .prompts import build_prompt_template
 
+    logger = get_logger()
     preproc_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
 
     print("\n" + "="*70)
     print(f"🚀 AVVIO INFERENZA PROMPTING: {experiment_name}")
     print("="*70)
+    logger.info(
+        "[inference:%s] prompting started — %d model(s), backend=%s, n_runs=%d, %d examples",
+        experiment_name, len(models_list), backend, n_runs, len(examples),
+    )
 
     if not os.path.exists(preproc_dir):
         print(f"  [❌ Error] Preprocessed images not found at: {preproc_dir}")
         print("  Run with skip_preprocessing: false first, or check your base_dir setting.")
+        logger.error("[inference:%s] preprocessed images not found at %s — aborting.", experiment_name, preproc_dir)
         return
 
     enabled_strategies = {
@@ -269,18 +336,26 @@ def run_prompting_experiments(
     }
     if not enabled_strategies:
         print("  [⚠️ Warning] No prompting strategies are enabled. Skipping.")
+        logger.warning("[inference:%s] no prompting strategies enabled — skipping.", experiment_name)
         return
 
-    for model_name in models_list:
-        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend})")
+    logger.info("[inference:%s] enabled strategies: %s", experiment_name, list(enabled_strategies.keys()))
+
+    for model_entry in models_list:
+        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
+        logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt)
+            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
         else:
+            if quantize_fp8:
+                logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)
             current_model = OllamaVLM(model_name=model_name, system_prompt=system_prompt)
         safe_model_name = model_name.replace(":", "_")
 
         for strategy_name, strategy_cfg in enabled_strategies.items():
             print(f"\n  📝 Strategy: {strategy_name}")
+            logger.info("[inference:%s] model '%s' — strategy '%s'", experiment_name, model_name, strategy_name)
             prompt_tpl = build_prompt_template(strategy_name, strategy_cfg)
 
             run_accuracies = []
@@ -295,6 +370,10 @@ def run_prompting_experiments(
                 out_json_path = os.path.join(out_run_dir, "raw_results.json")
 
                 print(f"    🔄 Run {run_idx}/{n_runs}...")
+                logger.info(
+                    "[inference:%s] model '%s' strategy '%s' — run %d/%d starting",
+                    experiment_name, model_name, strategy_name, run_idx, n_runs,
+                )
 
                 results = run_vqa(
                     examples=examples,
@@ -314,6 +393,10 @@ def run_prompting_experiments(
                 run_accuracies.append(acc)
                 run_exacts.append(exact)
                 print(f"       ↳ Risultato: {acc:.2f}% (Esatti: {exact})")
+                logger.info(
+                    "[inference:%s] model '%s' strategy '%s' — run %d/%d: acc=%.2f%% exact=%d",
+                    experiment_name, model_name, strategy_name, run_idx, n_runs, acc, exact,
+                )
 
             summary_stats = {
                 "experiment_name": experiment_name,
@@ -333,4 +416,14 @@ def run_prompting_experiments(
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary_stats, f, indent=4)
 
+            logger.info(
+                "[inference:%s] model '%s' strategy '%s' — SUMMARY: mean_acc=%.2f%% std_acc=%.2f mean_exact=%.2f → %s",
+                experiment_name, model_name, strategy_name,
+                summary_stats["metrics"]["mean_accuracy"],
+                summary_stats["metrics"]["std_accuracy"],
+                summary_stats["metrics"]["mean_exact_matches"],
+                summary_path,
+            )
+
     print("\n✅ Prompting experiments inference and evaluation complete!")
+    logger.info("[inference:%s] prompting experiments complete.", experiment_name)

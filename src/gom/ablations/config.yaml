@@ -7,9 +7,11 @@ n_runs: 2
 num_examples: 3       # -1 to use the full dataset
 force_reprocess: true # if true, overwrites existing preprocessed images
 
-questions_path: "/content/MultipleChoice_mscoco_val2014_questions.json"
-annotations_path: "/content/mscoco_val2014_annotations.json"
-images_dir: "/content/val2014"
+# Single flat VQAv1 JSON (list of {image_path, question, answers}).
+dataset_path: "/content/vqav1_limited_1000.json"
+images_dir: "/content/train2014"      # local images (Colab); leave images_base_url empty
+images_base_url: ""                    # e.g. "http://137.204.107.40:8000" to fetch over HTTP
+image_cache_dir: ""                    # empty ⇒ {base_dir}/image_cache
 
 # ==========================================
 # Ablation experiments

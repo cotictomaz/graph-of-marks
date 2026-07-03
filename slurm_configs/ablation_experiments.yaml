@@ -20,9 +20,18 @@ num_examples: -1      # -1 to use the full dataset
 # since the last run; it overwrites the existing preprocessed images.
 force_reprocess: false
 
-questions_path: "/workspace/data/MultipleChoice_mscoco_val2014_questions.json"
-annotations_path: "/workspace/data/mscoco_val2014_annotations.json"
-images_dir: "/workspace/data/val2014"
+# Single flat VQAv1 JSON (list of {image_path, question, answers}).
+dataset_path: "/workspace/vqav1_limited_1000.json"
+
+# --- Image location (see README_SLURM.md §"Images live only on node 40") ---
+# On node 40 (faretra), the images live locally: point images_dir at them and
+# leave images_base_url empty — no downloads happen.
+# On every OTHER node, leave images_dir as-is (it simply won't exist there) and
+# set images_base_url to node 40's HTTP image server; each image is fetched once
+# into image_cache_dir and reused thereafter.
+images_dir: "/workspace/data/train2014"
+images_base_url: ""            # e.g. "http://137.204.107.40:8000" when running off node 40
+image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (must be under /workspace)
 
 # ==========================================
 # Ablation experiments
@@ -34,9 +43,12 @@ ablations:
 
   # Add/remove Hugging Face repo IDs to compare more models. Each model is
   # loaded once into GPU memory (vllm) and reused across all ablation_grid values.
+  # An entry may be a plain string (bf16) or a mapping with `fp8: true` to
+  # FP8-quantize on load (see gom.ablations.models.parse_model_entry).
   models:
-    - "google/gemma-4-12B-it"
-    - "omkarthawakar/LlamaV-o1"
+    - "omkarthawakar/LlamaV-o1"          # anchor: reproduce the paper's ablation trends
+    - "Qwen/Qwen3-VL-4B-Instruct"        # \ same family, two sizes → is drawn-mark sensitivity
+    - "Qwen/Qwen3-VL-8B-Instruct"        # / scale-dependent? (both bf16-safe → keeps the big grid cheap)
 
   # Add, remove, or edit entries here to change which ablations run and over
   # which values. Each key under `experiments` must match a branch handled

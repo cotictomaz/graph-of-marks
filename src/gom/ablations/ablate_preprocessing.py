@@ -35,6 +35,15 @@ import shutil
 from typing import List, Dict, Any, Optional
 
 from .utils import run_preprocessing
+from .logging_utils import get_logger
+
+
+def _count_unique_images(examples: List[Any]) -> int:
+    """Count distinct source images in a list of VQA examples (best effort)."""
+    try:
+        return len({ex.image_path for ex in examples})
+    except Exception:
+        return len(examples)
 
 
 def generate_default_dataset(
@@ -61,24 +70,35 @@ def generate_default_dataset(
         base_dir: Root directory for all ablation outputs.
         force_reprocess: If True, deletes and rebuilds an existing folder.
     """
+    logger = get_logger()
     out_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
+
+    logger.info(
+        "[preprocessing:%s] default dataset — %d examples, %d unique images, overrides=%s",
+        experiment_name, len(examples), _count_unique_images(examples),
+        preprocessing_overrides or {},
+    )
 
     if os.path.exists(out_dir):
         if force_reprocess:
             print(f"\n  [♻️ FORCE REPROCESS] Clearing existing folder and recomputing: {out_dir}")
+            logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, out_dir)
             shutil.rmtree(out_dir)
             os.makedirs(out_dir)
         else:
             if len(os.listdir(out_dir)) > 0:
                 print(f"\n  [⏭️ SKIP] Default dataset already present in {out_dir}. Skipping.")
+                logger.info("[preprocessing:%s] SKIP — dataset already present in %s", experiment_name, out_dir)
                 return
             else:
                 print(f"\n  [▶️ RESUME] Empty folder found at {out_dir}. Starting processing.")
+                logger.info("[preprocessing:%s] RESUME — empty folder at %s", experiment_name, out_dir)
     else:
         os.makedirs(out_dir)
 
     print(f"\n  ↳ 🔧 Processing with default config (overrides: {preprocessing_overrides or {}})")
     print(f"  ↳ 💾 Saving to: {out_dir}")
+    logger.info("[preprocessing:%s] processing → %s", experiment_name, out_dir)
 
     run_preprocessing(
         examples=examples,
@@ -90,6 +110,7 @@ def generate_default_dataset(
     )
 
     print(f"\n✅ Default dataset generation for {experiment_name} done!")
+    logger.info("[preprocessing:%s] default dataset generation complete.", experiment_name)
     
 def generate_ablated_dataset(
     experiment_name: str,
@@ -122,14 +143,20 @@ def generate_ablated_dataset(
         Artifacts are saved strictly in:
         {base_dir}/preprocessed_images/{experiment_name}/{param1_value1_param2_value2}/
     """
+    logger = get_logger()
     keys = list(ablation_grid.keys())
     value_lists = list(ablation_grid.values())
-    
+
     lengths = [len(v) for v in value_lists]
     if len(set(lengths)) > 1:
         raise ValueError(f"Tutte le liste in ablation_grid devono avere la stessa lunghezza. Trovate: {lengths}")
-    
+
     print(f"🚀 Avvio Generazione Dataset: {experiment_name} (force_reprocess={force_reprocess})")
+    logger.info(
+        "[preprocessing:%s] started — %d grid point(s), %d examples, %d unique images, force_reprocess=%s",
+        experiment_name, lengths[0] if lengths else 0, len(examples),
+        _count_unique_images(examples), force_reprocess,
+    )
 
     for values_tuple in zip(*value_lists):
         current_overrides = dict(zip(keys, values_tuple))
@@ -142,9 +169,12 @@ def generate_ablated_dataset(
         folder_suffix = "_".join(folder_parts)
         out_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, folder_suffix)
 
+        logger.info("[preprocessing:%s] grid point %s → %s", experiment_name, current_overrides, folder_suffix)
+
         if os.path.exists(out_dir):
             if force_reprocess:
                 print(f"\n  [♻️ FORCE REPROCESS] Cancello la cartella esistente e ricalcolo: {folder_suffix}")
+                logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, folder_suffix)
                 shutil.rmtree(out_dir)
                 os.makedirs(out_dir)
             else:
@@ -152,15 +182,17 @@ def generate_ablated_dataset(
                 # Se è vuota (magari creata per errore e script interrotto), procediamo.
                 if len(os.listdir(out_dir)) > 0:
                     print(f"\n  [⏭️ SKIP] Dataset già presente in {folder_suffix}. Passo al prossimo parametro.")
+                    logger.info("[preprocessing:%s] SKIP — already present: %s", experiment_name, folder_suffix)
                     continue
                 else:
                     print(f"\n  [▶️ RESUME] Cartella vuota trovata per {folder_suffix}. Inizio processamento.")
+                    logger.info("[preprocessing:%s] RESUME — empty folder: %s", experiment_name, folder_suffix)
         else:
             os.makedirs(out_dir)
 
         print(f"\n  ↳ 🔧 Processamento configurazione: {current_overrides}")
         print(f"  ↳ 💾 Salvataggio in: {out_dir}")
-        
+
         run_preprocessing(
             examples=examples,
             preproc_folder=out_dir,
@@ -169,5 +201,7 @@ def generate_ablated_dataset(
             max_imgs=-1,
             max_qpi=-1
         )
-        
+        logger.info("[preprocessing:%s] grid point %s complete.", experiment_name, folder_suffix)
+
     print(f"\n✅ Operazioni su {experiment_name} terminate!")
+    logger.info("[preprocessing:%s] all grid points complete.", experiment_name)
