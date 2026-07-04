@@ -162,7 +162,7 @@ be **either** a plain string (`"repo/id"`, loaded in bf16) **or** a mapping
 `{name: "repo/id", fp8: true}` that FP8-quantizes *that model* on load
 (`model` is an alias for `name`, `quantize_fp8` for `fp8`). This lets a single
 config keep small models in bf16 while quantizing a large one to fit 24 GB —
-e.g. `google/gemma-4-12B-it` is ~24 GB in bf16 (too tight for a 3090 with KV
+e.g. `google/gemma-3-12b-it` is ~24 GB in bf16 (too tight for a 3090 with KV
 cache) but ~13 GB in FP8. FP8 is a no-op on the `ollama` backend (warned and
 ignored). Parsed by `gom.ablations.models.parse_model_entry`.
 
@@ -170,8 +170,8 @@ ignored). Parsed by `gom.ablations.models.parse_model_entry`.
 Qwen-2.5-VL-7B / Gemma-3-4B / LlamaV-o1-11B. The current configs extend along
 generation, scale, architecture, and reasoning axes:
 - **`vlm_comparison`** — `LlamaV-o1` (retained paper anchor) + newest-gen
-  `Qwen3-VL-8B-Instruct` and `google/gemma-4-12B-it` (FP8) + `InternVL3_5-8B`
-  (distinct ViT–MLP–LLM lineage). Tests whether GoM still helps two-generations-newer and different-architecture models.
+  `Qwen3-VL-8B-Instruct` and `google/gemma-3-12b-it` (FP8) + `InternVL3_5-8B`
+  (distinct ViT–MLP–LLM lineage). Tests whether GoM still helps two-generations-newer and different-architecture models. (Gemma-4 / `gemma4_unified` is not yet supported by transformers 4.57.6 / vllm 0.11.0, so the 12B Gemma-3 fills this slot — the newest supported Gemma.)
 - **`ablation_experiments`** — `LlamaV-o1` anchor + `Qwen3-VL-4B` and
   `Qwen3-VL-8B` (same family, two sizes → is drawn-mark sensitivity
   scale-dependent?). Kept bf16-safe to keep the big grid cheap.
@@ -317,7 +317,7 @@ without editing anything outside `src/gom/ablations/`:
   `num_ctx` to 16384 for those models. Both wrappers accept an explicit
   `max_tokens=` override. Detection is name-based, so a thinking model whose
   repo id lacks an obvious keyword defaults to 512 — use the override for that.
-  Note: `google/gemma-4-12B-it` is an instruction-tuned model, **not** a
+  Note: `google/gemma-3-12b-it` is an instruction-tuned model, **not** a
   reasoning model, so it correctly stays at 512.
 - **Prompts request a concise, parseable answer without forbidding reasoning.**
   The shared `multimodal_prompt` / `system_prompt` in `main.py` and the four
@@ -348,9 +348,9 @@ Guide") wired specifically to run `gom.ablations.main`. Full walkthrough in
 
 | Path | Role |
 |------|------|
-| `build/Dockerfile` | Standard image (CUDA 12.2, Ubuntu 22.04) for RTX 3090 / Titan Xp nodes. Installs `build/requirements.txt`, builds `detectron2` from git (not on PyPI), downloads spaCy/NLTK model data, then `pip install --no-deps -e .` to register `gom` as editable against `/workspace` |
+| `build/Dockerfile` | Standard image (CUDA 12.2 base, Ubuntu 22.04, python3.11) for RTX 3090 / Titan Xp nodes. Like the 5090 variant, it **strips** the six legacy pins from `requirements.txt` (`torch`/`torchvision`/`torchaudio` + `vllm`/`transformers`/`tokenizers`) and installs the modern stack — `torch==2.8.0+cu126` first, then `vllm==0.11.0` + the remaining pins in one pass (pulling `transformers==4.57.x` / `tokenizers==0.22.x`). This is what makes the cutting-edge ablation models (Qwen3-VL, InternVL3.5, Gemma-3) loadable; the old cu124/`vllm==0.8.5` set only registered LlamaV-o1. (Gemma-**4** / `gemma4_unified` is still unsupported by transformers 4.57.6 — the configs use `gemma-3-12b-it`, the newest supported Gemma.) Differs from the 5090 file only where Ampere requires: **cu126** wheels (not cu128 — sm_86 is fully supported on cu126, the closest channel to these nodes' 12.5 driver) and **no `TORCH_CUDA_ARCH_LIST` override** (sm_86 is in torch's default arch list, and leaving it unset keeps the Titan Xp / sm_61 preprocessing path). Then builds `detectron2` from git (not on PyPI), downloads spaCy/NLTK model data, and `pip install --no-deps -e .` to register `gom` as editable against `/workspace` |
 | `build/Dockerfile.rtx5090` | CUDA 12.8 / Ubuntu 24.04 variant for the cluster's RTX 5090 (Blackwell / sm_120) node. It **cannot reuse** `requirements.txt`'s cu124 stack: it strips out `torch`/`torchvision`/`torchaudio` **and** `vllm`/`transformers`/`tokenizers`, installs `torch==2.8.0+cu128` first, then resolves `vllm==0.11.0` together with the remaining pins in one pass (which pulls `transformers==4.57.x` / `tokenizers==0.22.x`, kept <5 so the rest of the pinned stack is unaffected). **Why the vllm bump is mandatory, not cosmetic:** `vllm==0.8.5` is compiled against torch 2.6.0/cu124 and has no sm_120 kernels — its extensions won't even import against a cu128 torch, so an RTX 5090 image built on the cu124 pins produces a vLLM that fails at `import`. `vllm==0.11.0` (torch 2.8.0, Blackwell kernels) also adds support for the Qwen3-VL / InternVL3.5-era models the configs use. Everything except torch is `--no-cache-dir` installed; detectron2 is built from source with `TORCH_CUDA_ARCH_LIST="12.0"` |
-| `build/requirements.txt` | Exact-pinned dependency set for the **standard cu124 image only** (verified via `pip install --dry-run` to resolve with no conflicts) — deliberately pins `torch==2.6.0`/cu124 and `vllm==0.8.5` rather than letting them float, since an unconstrained resolve drifts to cu13 wheels needing a newer NVIDIA driver than older cluster nodes may have. `build/Dockerfile.rtx5090` overrides six of these pins (the three torch packages + `vllm`/`transformers`/`tokenizers`) for the Blackwell stack — see that row and the header comment in this file. Do not assume a pin here is what the 5090 image actually runs |
+| `build/requirements.txt` | Exact-pinned dependency set (verified via `pip install --dry-run` to resolve with no conflicts). The `torch==2.6.0`/cu124 and `vllm==0.8.5` pins here are now the **legacy baseline**, overridden by **both** Docker images and kept only as reference + for the non-Docker `make install_deps` path. `build/Dockerfile` (cu126) and `build/Dockerfile.rtx5090` (cu128) each strip the same six pins (the three torch packages + `vllm`/`transformers`/`tokenizers`) and install `torch==2.8.0` + `vllm==0.11.0`, differing only in the torch CUDA channel. **Do not assume a pin here is what either GPU image actually runs** — see each Dockerfile's header + strip block |
 | `train.sh` | Container entry point; runs `python3 -m gom.ablations.main --config "$1"` |
 | `run_docker.sh` | Host-side script SLURM's `sbatch` invokes; bind-mounts the project dir to `/workspace` and the cluster's shared model cache (`/llms`) with `HF_HOME` set, then runs `train.sh` inside the container |
 | `sbatch_train.sh` | Example `sbatch` submissions, one per `slurm_configs/*.yaml` |
@@ -366,16 +366,39 @@ is enough.
 
 ### Last verified build state
 
-As of 2026-07-02, `docker build -f build/Dockerfile -t gom:latest .` (the
-standard RTX 3090 / Titan Xp image) builds cleanly end to end on the pinned
-`build/requirements.txt` set: dependency install, the from-source
-`detectron2` build, and the spaCy/NLTK model downloads all complete without
-conflicts, and the final `pip install --no-deps -e .` registers `gom`
-1.1.0 correctly. Sanity-checked with `docker run --rm gom:latest python3 -m
-gom.ablations.main --help`, which prints the CLI usage as expected (the
-"NVIDIA Driver was not detected" / vLLM CUDA-import warnings are expected on
-a machine with no GPU, e.g. a local build/test machine, and are not build
-failures).
+As of 2026-07-04, `build/Dockerfile` (the standard RTX 3090 / Titan Xp image)
+was upgraded from the legacy cu124/`vllm==0.8.5` stack to the modern
+`torch==2.8.0+cu126` / `vllm==0.11.0` / `transformers==4.57.6` stack (see the
+table row above) and built + verified **on an RTX 3090 node**. The cu126 set
+was pre-checked with `pip install --dry-run` (torch 2.8.0+cu126 + `vllm==0.11.0`
++ the stripped `requirements.txt`), resolving to the same package set as the
+5090's cu128 build (`transformers==4.57.6`, `tokenizers==0.22.2`,
+`numpy==2.1.1`, `sentence-transformers==3.4.1`, `xformers==0.0.32.post1`) —
+only the torch CUDA channel differs. The actual build matched it, compiled
+`detectron2` 0.6 from source, downloaded spaCy/NLTK data, and registered
+`graph-of-mark 1.1.0` editable. Verified on-GPU (`docker run --gpus all`):
+`torch.cuda.is_available()` is `True`, device `NVIDIA GeForce RTX 3090
+(sm_86)`, torch's arch list includes `sm_86`, and `from vllm import LLM,
+SamplingParams` imports cleanly. Crucially, `AutoConfig.from_pretrained` now
+resolves every VLM the configs use **except one**: `Qwen/Qwen3-VL-{4B,8B}-*`
+(`qwen3_vl`), `OpenGVLab/InternVL3_5-8B` (`internvl_chat`), and
+`omkarthawakar/LlamaV-o1` (`mllama`) all load — these were the architectures
+**ABSENT** on the old `vllm==0.8.5` image. The **image was retagged
+`gom:latest`** so `run_docker.sh` (default `GOM_IMAGE_NAME=gom:latest`) uses it
+unchanged. **Note — `google/gemma-4-12B-it` (`model_type=gemma4_unified`) is
+unsupported on BOTH images** (`transformers==4.57.6` raises `ValueError: does
+not recognize this architecture`; a fix needs a transformers bump `vllm==0.11.0`
+does not yet allow — this is a shared limitation, not a cu126 regression). The
+`vlm_comparison.yaml` config was therefore switched to
+`google/gemma-3-12b-it` (`model_type=gemma3`, `Gemma3ForConditionalGeneration`,
+supported by `vllm==0.11.0`), kept at `fp8: true` so it fits a 24 GB card. It is
+a **gated** repo, so the run needs an `HF_TOKEN` — see README_SLURM / the
+`HF_TOKEN` note in `run_docker.sh`.
+
+As of 2026-07-02, the earlier cu124 `build/Dockerfile` (torch 2.6.0 / vllm
+0.8.5) also built cleanly end to end and passed `python3 -m gom.ablations.main
+--help`; that stack only registered the LlamaV-o1 (`mllama`) architecture,
+which is why it was superseded by the cu126 build above.
 
 As of 2026-07-04, `build/Dockerfile.rtx5090` was reworked (see its table row
 above) and built + verified **on the RTX 5090 node (server 43)**. The cu128

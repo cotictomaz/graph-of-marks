@@ -16,12 +16,18 @@
 # torch 2.11/cu13 wheels needing a very recent NVIDIA driver).
 #
 # NOTE: the torch/torchvision/torchaudio AND vllm/transformers/tokenizers pins
-# below are the verified set for the standard (RTX 3090 / Titan Xp / cu124)
-# image only. build/Dockerfile.rtx5090 strips all six of these out and installs
-# a Blackwell/sm_120-compatible cu128 set instead — torch 2.8.0+cu128 and
-# vllm==0.11.0 (which pulls transformers 4.57.x / tokenizers 0.22.x). vllm 0.8.5
-# below is built against torch 2.6.0/cu124 and cannot run on the RTX 5090, so it
-# is deliberately overridden there; see that Dockerfile for the full rationale.
+# below are the legacy cu124 set and are now OVERRIDDEN by BOTH Docker images —
+# they are kept here only as the reference baseline and for the non-Docker
+# `make install_deps` path. vllm 0.8.5 / transformers 4.51.3 do not register the
+# Qwen3-VL / InternVL3.5 / Gemma-4 architectures the ablations use (only
+# LlamaV-o1 loads), so:
+#   * build/Dockerfile          strips all six and installs torch 2.8.0+cu126 +
+#                               vllm==0.11.0 (Ampere / RTX 3090, sm_86).
+#   * build/Dockerfile.rtx5090  strips all six and installs torch 2.8.0+cu128 +
+#                               vllm==0.11.0 (Blackwell / RTX 5090, sm_120).
+# Both pull transformers 4.57.x / tokenizers 0.22.x via vllm 0.11.0; the two
+# images differ only in the torch CUDA channel (cu126 vs cu128). See each
+# Dockerfile's strip-and-reinstall block for the full rationale.
 
 # --- core pipeline dependencies ---
 torch==2.6.0

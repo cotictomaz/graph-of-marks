@@ -53,3 +53,6 @@ tests/
 scripts_test/
 
 .coverage
+# Hugging Face access token (never commit secrets)
+.hf_token
+.hf_token.local
