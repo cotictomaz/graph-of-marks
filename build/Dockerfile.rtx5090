@@ -34,19 +34,40 @@ RUN pip install --upgrade pip
 RUN pip install wrapt --upgrade --ignore-installed
 RUN pip install gdown
 
-# Install everything except torch/torchvision: the RTX 5090 needs cu128
-# wheels installed separately below (see the guide's "RTX 5090 Special
-# Requirements" section).
+# Strip the deps that requirements.txt pins for the RTX 3090 / cu124 stack but
+# that must differ on the RTX 5090 (Blackwell / sm_120):
+#   * torch/torchvision/torchaudio -> reinstalled as cu128 wheels below.
+#   * vllm==0.8.5 -> that release is built against torch 2.6.0/cu124 and has NO
+#     sm_120 kernels; its compiled extensions won't even import against the
+#     cu128 torch installed here. We install vllm==0.11.0 instead (built for
+#     torch 2.8.0, has Blackwell kernels, and supports the Qwen3-VL /
+#     InternVL3.5-era models these ablations use).
+#   * transformers/tokenizers -> unpinned so vllm 0.11.0 can pull a compatible
+#     pair (transformers 4.57.x / tokenizers 0.22.x); still <5, so the rest of
+#     the pinned stack (e.g. sentence-transformers==3.4.1) is unaffected.
+# This whole cu128 set was verified to resolve cleanly with `pip install
+# --dry-run` (see build/requirements.txt's header note).
 COPY build/requirements.txt .
-RUN grep -v -E '^torch(vision)?[>=<]' requirements.txt > requirements.no-torch.txt && \
-    pip install --no-cache-dir -r requirements.no-torch.txt
+RUN grep -v -iE '^(torch|torchvision|torchaudio|vllm|transformers|tokenizers)[>=<]' \
+        requirements.txt > requirements.cu128.txt
 
-# Install PyTorch with CUDA 12.8 support for RTX 5090
+# Install PyTorch with CUDA 12.8 support for RTX 5090 (Blackwell / sm_120) FIRST,
+# so the vllm + rest-of-requirements resolve below sees torch already satisfied
+# and never pulls a non-cu128 wheel over it.
 RUN pip install --no-cache-dir \
-        torch==2.7.1+cu128 \
-        torchvision==0.22.1+cu128 \
-        torchaudio==2.7.1+cu128 \
+        torch==2.8.0+cu128 \
+        torchvision==0.23.0+cu128 \
+        torchaudio==2.8.0+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
+
+# Resolve vllm 0.11.0 together with the remaining pinned deps in a single pass
+# (matches the verified dry-run). torch/vision/audio are already satisfied by
+# the cu128 wheels above; the extra-index-url keeps any torch-family resolution
+# on the cu128 channel just in case.
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        vllm==0.11.0 \
+        -r requirements.cu128.txt
 
 # detectron2 is not distributed on PyPI; build it against the torch version
 # installed above (--no-deps avoids pulling a second, unpinned torch).

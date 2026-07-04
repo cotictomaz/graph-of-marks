@@ -100,6 +100,22 @@ etc. — expect this to take a while the first time; subsequent builds reuse
 Docker's layer cache and are much faster unless `build/requirements.txt`
 changed.
 
+**RTX 5090 (moro43 / server 43) uses a different, non-shared dependency
+stack.** The RTX 5090 is Blackwell (sm_120) and needs CUDA 12.8 wheels, so
+`build/Dockerfile.rtx5090` does **not** just reuse `build/requirements.txt`
+with a torch swap. It strips the six pins that are cu124-specific
+(`torch`/`torchvision`/`torchaudio` **and** `vllm`/`transformers`/`tokenizers`)
+and installs a Blackwell-compatible set instead: `torch==2.8.0+cu128` +
+`vllm==0.11.0` (which pulls `transformers==4.57.x`). This is required, not
+optional — the standard image's `vllm==0.8.5` is built against torch
+2.6.0/cu124, has no sm_120 kernels, and **fails to `import` against the cu128
+torch**, so building the RTX 5090 node from the cu124 pins gives you a vLLM
+that dies at startup. Verified building + running on server 43 as of
+2026-07-04 (`torch.cuda` sees the RTX 5090 at sm_120; `from vllm import LLM`
+imports cleanly). If you change either Dockerfile's torch/vllm versions,
+re-verify with a `pip install --dry-run` first (see the troubleshooting note
+on `ResolutionImpossible` below).
+
 **When do you rebuild?** Only when:
 - You edit `build/Dockerfile`, `build/Dockerfile.rtx5090`, or
   `build/requirements.txt` (added/removed a Python package).
@@ -422,6 +438,19 @@ changed `build/Dockerfile` or `build/requirements.txt`.
 - **`ImportError: vllm`/`ollama` inside the container** — you built the
   image before `build/requirements.txt` included these packages, or edited
   requirements without rebuilding; run `docker build` again.
+- **vLLM import fails with an `undefined symbol` / torch-ABI error on the
+  RTX 5090** — you built the 5090 node with the standard `build/Dockerfile`
+  (or an old `Dockerfile.rtx5090` that kept `vllm==0.8.5`). That vLLM is
+  compiled against torch 2.6.0/cu124 and cannot load against the cu128 torch
+  the 5090 needs. Rebuild with the current `build/Dockerfile.rtx5090`
+  (`torch==2.8.0+cu128` + `vllm==0.11.0`) — see §2.
+- **`ResolutionImpossible` after changing a torch/vllm/transformers pin** —
+  those three are tightly coupled (vLLM hard-pins an exact torch and a
+  minimum transformers). Before rebuilding, verify the whole set resolves
+  with `pip install --dry-run` (for the 5090 stack, include
+  `--extra-index-url https://download.pytorch.org/whl/cu128`). Note the 5090
+  image overrides `requirements.txt`'s torch/vllm/transformers/tokenizers
+  pins — change them in `build/Dockerfile.rtx5090`, not just requirements.
 - **Model re-downloads every run instead of reusing the cache** —
   double-check `/llms` actually exists on that node and `HF_HOME` is set (it
   is, automatically, by `run_docker.sh`); don't override `HF_HOME` in your

@@ -349,8 +349,8 @@ Guide") wired specifically to run `gom.ablations.main`. Full walkthrough in
 | Path | Role |
 |------|------|
 | `build/Dockerfile` | Standard image (CUDA 12.2, Ubuntu 22.04) for RTX 3090 / Titan Xp nodes. Installs `build/requirements.txt`, builds `detectron2` from git (not on PyPI), downloads spaCy/NLTK model data, then `pip install --no-deps -e .` to register `gom` as editable against `/workspace` |
-| `build/Dockerfile.rtx5090` | CUDA 12.8 / Ubuntu 24.04 variant for the cluster's RTX 5090 node; installs everything except torch from `build/requirements.txt`, then installs `torch==2.7.1+cu128` wheels separately |
-| `build/requirements.txt` | Exact-pinned dependency set (verified via `pip install --dry-run` to resolve with no conflicts) — deliberately pins `torch==2.6.0`/cu124 rather than letting `torch>=2.4.0` float to whatever's newest, since an unconstrained resolve drifts to cu13 wheels that need a newer NVIDIA driver than older cluster nodes may have |
+| `build/Dockerfile.rtx5090` | CUDA 12.8 / Ubuntu 24.04 variant for the cluster's RTX 5090 (Blackwell / sm_120) node. It **cannot reuse** `requirements.txt`'s cu124 stack: it strips out `torch`/`torchvision`/`torchaudio` **and** `vllm`/`transformers`/`tokenizers`, installs `torch==2.8.0+cu128` first, then resolves `vllm==0.11.0` together with the remaining pins in one pass (which pulls `transformers==4.57.x` / `tokenizers==0.22.x`, kept <5 so the rest of the pinned stack is unaffected). **Why the vllm bump is mandatory, not cosmetic:** `vllm==0.8.5` is compiled against torch 2.6.0/cu124 and has no sm_120 kernels — its extensions won't even import against a cu128 torch, so an RTX 5090 image built on the cu124 pins produces a vLLM that fails at `import`. `vllm==0.11.0` (torch 2.8.0, Blackwell kernels) also adds support for the Qwen3-VL / InternVL3.5-era models the configs use. Everything except torch is `--no-cache-dir` installed; detectron2 is built from source with `TORCH_CUDA_ARCH_LIST="12.0"` |
+| `build/requirements.txt` | Exact-pinned dependency set for the **standard cu124 image only** (verified via `pip install --dry-run` to resolve with no conflicts) — deliberately pins `torch==2.6.0`/cu124 and `vllm==0.8.5` rather than letting them float, since an unconstrained resolve drifts to cu13 wheels needing a newer NVIDIA driver than older cluster nodes may have. `build/Dockerfile.rtx5090` overrides six of these pins (the three torch packages + `vllm`/`transformers`/`tokenizers`) for the Blackwell stack — see that row and the header comment in this file. Do not assume a pin here is what the 5090 image actually runs |
 | `train.sh` | Container entry point; runs `python3 -m gom.ablations.main --config "$1"` |
 | `run_docker.sh` | Host-side script SLURM's `sbatch` invokes; bind-mounts the project dir to `/workspace` and the cluster's shared model cache (`/llms`) with `HF_HOME` set, then runs `train.sh` inside the container |
 | `sbatch_train.sh` | Example `sbatch` submissions, one per `slurm_configs/*.yaml` |
@@ -375,7 +375,24 @@ conflicts, and the final `pip install --no-deps -e .` registers `gom`
 gom.ablations.main --help`, which prints the CLI usage as expected (the
 "NVIDIA Driver was not detected" / vLLM CUDA-import warnings are expected on
 a machine with no GPU, e.g. a local build/test machine, and are not build
-failures). `build/Dockerfile.rtx5090` was not re-verified in this pass.
+failures).
+
+As of 2026-07-04, `build/Dockerfile.rtx5090` was reworked (see its table row
+above) and built + verified **on the RTX 5090 node (server 43)**. The cu128
+set was pre-checked with a `pip install --dry-run` (torch 2.8.0+cu128 +
+`vllm==0.11.0` + the stripped `requirements.txt`) resolving to 215 packages
+with no conflicts, and the actual build matched it exactly:
+`torch==2.8.0+cu128`, `vllm==0.11.0`, `transformers==4.57.6`,
+`tokenizers==0.22.2`, `numpy==2.1.1`, `sentence-transformers==3.4.1` (kept),
+`xformers==0.0.32.post1`. detectron2 compiled from source, spaCy/NLTK data
+downloaded, and `graph-of-mark 1.1.0` registered editable. Verified on-GPU
+(`docker run --gpus all`): `torch.cuda.is_available()` is `True`, the device
+is `NVIDIA GeForce RTX 5090 (sm_120)`, torch's arch list includes `sm_120`,
+and `from vllm import LLM, SamplingParams` (the exact API `VllmVLM` uses)
+imports cleanly — i.e. the old cu124 `vllm==0.8.5` import failure is gone.
+This was the fix for that failure; the earlier `Dockerfile.rtx5090` (which
+kept `vllm==0.8.5` and only swapped torch to 2.7.1+cu128) would have produced
+a vLLM that could not import against the cu128 torch.
 
 ## Legacy / Reference Files
 

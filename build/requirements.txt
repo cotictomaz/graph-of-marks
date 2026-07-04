@@ -15,9 +15,13 @@
 # floors would otherwise resolve to unconstrained (which drifted to
 # torch 2.11/cu13 wheels needing a very recent NVIDIA driver).
 #
-# NOTE: torch/torchvision/torchaudio are listed here for the standard
-# (RTX 3090 / Titan Xp) image. build/Dockerfile.rtx5090 strips these three
-# lines out and installs matching cu128 wheels separately (see that file).
+# NOTE: the torch/torchvision/torchaudio AND vllm/transformers/tokenizers pins
+# below are the verified set for the standard (RTX 3090 / Titan Xp / cu124)
+# image only. build/Dockerfile.rtx5090 strips all six of these out and installs
+# a Blackwell/sm_120-compatible cu128 set instead — torch 2.8.0+cu128 and
+# vllm==0.11.0 (which pulls transformers 4.57.x / tokenizers 0.22.x). vllm 0.8.5
+# below is built against torch 2.6.0/cu124 and cannot run on the RTX 5090, so it
+# is deliberately overridden there; see that Dockerfile for the full rationale.
 
 # --- core pipeline dependencies ---
 torch==2.6.0
