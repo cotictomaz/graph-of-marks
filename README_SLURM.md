@@ -432,6 +432,38 @@ changed `build/Dockerfile` or `build/requirements.txt`.
 - **`docker: command not found` / permission errors** — you haven't run
   `install_rootless_docker.sh` on this node yet, or need to restart your
   shell / run `systemctl --user start docker` (see the cluster guide §4).
+- **No container starts — `runc create failed: ... can't mask dir
+  "/proc/acpi": mount src=tmpfs ... nr_blocks=1,nr_inodes=1: invalid
+  argument`** — a **runc-newer-than-kernel** mismatch, not a build or config
+  problem: it blocks *every* container startup (`docker run` **and** each
+  `docker build` `RUN` step). Rootless Docker's bundled runc (1.3.x, in
+  `~/bin/runc`) masks sensitive `/proc` paths with a size-limited read-only
+  tmpfs that the node's old **kernel 5.4** rejects with `EINVAL`. Nodes on the
+  5.4 kernel (e.g. faretra / node 40) are affected. **The tutors'
+  `docker_rootless_fix.sh` does *not* fix this** — it reinstalls Docker from
+  `get.docker.com/rootless`, pulling the *same* latest runc, so the mismatch
+  returns. **Fix:** shadow your rootless runc with the node's older system
+  runc (1.1.x, which uses a masking scheme the 5.4 kernel accepts) and restart
+  your per-user daemon:
+
+  ```bash
+  cp ~/bin/runc ~/bin/runc.1.3.6.bak    # backup (reversible escape hatch)
+  cp /usr/sbin/runc ~/bin/runc          # system runc is 1.1.7 on 20.04 nodes
+  systemctl --user restart docker       # bounces only YOUR rootless daemon
+  docker run --rm hello-world           # verify
+  ```
+
+  This is safe without sudo and does **not** affect other users: it only
+  touches files under your `$HOME` and restarts your own rootless daemon;
+  `/usr/sbin/runc` is merely *read* (copied), never modified. **Keep the 1.1.7
+  runc in place permanently** — runc is invoked every time a container starts
+  (build *and* run), and the image does not bake it in, so reverting would
+  re-break the finished image at `docker run`. Note: re-running
+  `docker_rootless_fix.sh` or any Docker reinstall/upgrade overwrites
+  `~/bin/runc` back to 1.3.x and reintroduces the bug — just re-copy the 1.1.7
+  if that happens. A per-command band-aid without the swap is
+  `docker run --security-opt systempaths=unconfined ...` (disables `/proc`
+  masking; doesn't cleanly cover `docker build`).
 - **Job fails immediately with a missing-file error** — the code, image, or
   dataset files under `data/` don't exist on the node SLURM picked. Re-run
   `git pull` and `docker build` on that specific node (guide §7).

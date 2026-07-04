@@ -364,6 +364,30 @@ changes (edits to `build/Dockerfile*` or `build/requirements.txt`), never for
 ordinary `src/gom/**` or `slurm_configs/*.yaml` edits — `git pull` + `sbatch`
 is enough.
 
+### runc/kernel incompatibility on old-kernel nodes (5.4)
+
+On nodes still running **kernel 5.4** (e.g. faretra / node 40), rootless
+Docker's bundled **runc 1.3.x** (`~/bin/runc`) cannot start *any* container —
+both `docker run` and every `docker build` `RUN` step die with
+`runc create failed: ... can't mask dir "/proc/acpi": mount src=tmpfs ...
+nr_blocks=1,nr_inodes=1: invalid argument`. runc 1.2+ masks sensitive `/proc`
+paths with a size-limited read-only tmpfs the 5.4 kernel rejects (`EINVAL`).
+This is a **runc-newer-than-kernel mismatch**, not a Docker/image/config bug,
+and the tutors' `docker_rootless_fix.sh` does **not** fix it (it reinstalls the
+*same* latest runc from `get.docker.com/rootless`). **Fix:** shadow the
+rootless runc with the node's system runc **1.1.7** (`/usr/sbin/runc`, whose
+older masking scheme the 5.4 kernel accepts) and restart the per-user daemon —
+`cp ~/bin/runc ~/bin/runc.1.3.6.bak; cp /usr/sbin/runc ~/bin/runc; systemctl
+--user restart docker`. No sudo, no impact on other users (only `$HOME` files +
+your own rootless daemon are touched; `/usr/sbin/runc` is read-only copied).
+**Keep 1.1.7 permanently** — runc runs on every container start (build *and*
+the SLURM `docker run`), and the image doesn't bake it in, so reverting
+re-breaks the built image at run time. A Docker reinstall/upgrade (or re-running
+`docker_rootless_fix.sh`) overwrites `~/bin/runc` back to 1.3.x and reintroduces
+the bug. Full writeup + a `--security-opt systempaths=unconfined` per-command
+band-aid: README_SLURM.md §7. (Verified 2026-07-04 on faretra: after the swap,
+`docker run hello-world` and a trivial `docker build` both succeed.)
+
 ### Last verified build state
 
 As of 2026-07-04, `build/Dockerfile` (the standard RTX 3090 / Titan Xp image)
