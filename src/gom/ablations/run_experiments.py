@@ -3,9 +3,13 @@ import json
 import statistics
 from typing import List, Dict, Any, Optional
 
-# Assicurati di importare i runner e i valutatori corretti
-from gom.vqa.runner import run_vqa, evaluate
-from .models import OllamaVLM, VllmVLM, parse_model_entry
+# Assicurati di importare i runner e i valutatori corretti.
+# NB: usiamo il valutatore VQA "ufficiale" definito in ablations/evaluation.py
+# (accuracy soft su 10 risposte + estrazione della risposta finale per i modelli
+# di ragionamento) al posto del vecchio exact-match di gom.vqa.runner.evaluate.
+from gom.vqa.runner import run_vqa
+from .evaluation import evaluate_vqa
+from .models import OllamaVLM, VllmVLM, parse_model_entry, release_model
 from .logging_utils import get_logger
 
 def run_ablation_experiments(
@@ -126,8 +130,10 @@ def run_ablation_experiments(
                 )
 
                 # Calcolo delle metriche per questa run
-                metrics = evaluate(results)
-                acc = metrics.get('exact_percent', 0.0)
+                # VQA soft accuracy (official metric) is the headline number;
+                # `exact` is the stricter normalized exact-match count.
+                metrics = evaluate_vqa(results)
+                acc = metrics.get('vqa_accuracy', 0.0)
                 exact = metrics.get('exact', 0)
                 
                 run_accuracies.append(acc)
@@ -166,6 +172,11 @@ def run_ablation_experiments(
                 summary_stats["metrics"]["mean_exact_matches"],
                 summary_path,
             )
+
+        # This model is done: free its VRAM before the next model loads so two
+        # models never sit resident at once (see models.release_model).
+        release_model(current_model)
+        current_model = None
 
     print("\n✅ Tutte le inferenze e le valutazioni completate!")
     logger.info("[inference:%s] all inference and evaluation complete.", experiment_name)
@@ -248,8 +259,10 @@ def run_vlm_comparison(
                 skip_preproc=True,
             )
 
-            metrics = evaluate(results)
-            acc = metrics.get("exact_percent", 0.0)
+            # VQA soft accuracy (official metric) is the headline number;
+            # `exact` is the stricter normalized exact-match count.
+            metrics = evaluate_vqa(results)
+            acc = metrics.get("vqa_accuracy", 0.0)
             exact = metrics.get("exact", 0)
             run_accuracies.append(acc)
             run_exacts.append(exact)
@@ -282,6 +295,11 @@ def run_vlm_comparison(
             summary_stats["metrics"]["mean_exact_matches"],
             summary_path,
         )
+
+        # This model is done: free its VRAM before the next model loads so two
+        # models never sit resident at once (see models.release_model).
+        release_model(current_model)
+        current_model = None
 
     print("\n✅ VLM comparison inference and evaluation complete!")
     logger.info("[inference:%s] VLM comparison complete.", experiment_name)
@@ -387,8 +405,10 @@ def run_prompting_experiments(
                     skip_preproc=True,
                 )
 
-                metrics = evaluate(results)
-                acc = metrics.get("exact_percent", 0.0)
+                # VQA soft accuracy (official metric) is the headline number;
+                # `exact` is the stricter normalized exact-match count.
+                metrics = evaluate_vqa(results)
+                acc = metrics.get("vqa_accuracy", 0.0)
                 exact = metrics.get("exact", 0)
                 run_accuracies.append(acc)
                 run_exacts.append(exact)
@@ -424,6 +444,11 @@ def run_prompting_experiments(
                 summary_stats["metrics"]["mean_exact_matches"],
                 summary_path,
             )
+
+        # This model is done: free its VRAM before the next model loads so two
+        # models never sit resident at once (see models.release_model).
+        release_model(current_model)
+        current_model = None
 
     print("\n✅ Prompting experiments inference and evaluation complete!")
     logger.info("[inference:%s] prompting experiments complete.", experiment_name)

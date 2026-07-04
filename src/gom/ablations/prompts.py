@@ -79,9 +79,16 @@ FEW_SHOT_POOL = [
 # -----------------------------------------------------------------------
 
 def _baseline_template() -> str:
+    # Minimal control prompt. We do NOT suppress reasoning here (that would
+    # penalise reasoning models and blur the contrast with chain_of_thought);
+    # we only require a concise, parseable final answer so the VQA metric can
+    # score it. extract_final_answer splits on the last "Answer:" marker. The
+    # prompt intentionally does not end with "Answer:" so a reasoning model can
+    # still think before emitting its answer line.
     return (
         "Answer the question based on the spatial configuration in the image "
-        "and the graph description.\n\n"
+        "and the graph description. Conclude with your final answer on a new "
+        "line in the form:\nAnswer: <one word or a short phrase>\n\n"
         "Question: {question}"
     )
 

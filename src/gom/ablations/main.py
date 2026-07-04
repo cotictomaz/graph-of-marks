@@ -287,9 +287,18 @@ def main():
     prompting_overrides     = prompting_cfg.get("preprocessing_overrides", {}) or {}
     prompting_strategies    = prompting_cfg.get("strategies", {})
 
-    # Shared prompts (identical for both experiment types)
+    # Shared prompts (identical for both experiment types).
+    # IMPORTANT: we do NOT forbid explanation/reasoning. Doing so would cripple
+    # reasoning models (LlamaV-o1, *-Thinking) and contradict chain_of_thought
+    # prompting. Instead the model may reason freely and is only asked to
+    # CONCLUDE with a concise, parseable final answer ("Answer: <word/phrase>").
+    # The official VQA metric (ablations/evaluation.py) scores that final answer,
+    # which extract_final_answer pulls out after the last "Answer:" marker — so
+    # reasoning is preserved AND short-answer scoring works. Note the prompt does
+    # not END with "Answer:", which would pre-empt a reasoning model's thinking;
+    # the model emits the "Answer:" line itself.
     system_prompt     = "You are a multimodal assistant capable of understanding both visual and textual scene graphs. Use the image and the accompanying graph description to answer the question accurately."
-    multimodal_prompt = "Answer the question based on the spatial configuration in the image and the graph description.\n\nQuestion: {question}"
+    multimodal_prompt = "Answer the question based on the spatial configuration in the image and the graph description. Conclude with your final answer on a new line in the form:\nAnswer: <one word or a short phrase>\n\nQuestion: {question}"
 
     # Record the global run settings and which experiment types are enabled.
     log_section("GLOBAL RUN SETTINGS")

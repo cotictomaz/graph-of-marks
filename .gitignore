@@ -15,7 +15,6 @@ __pycache__/
 *.tar.xz
 *.pth
 *.pt
-*.json
 
 
 **/data/

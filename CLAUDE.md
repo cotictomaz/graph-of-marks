@@ -128,9 +128,10 @@ paper's ablation studies. Entry point: `python -m gom.ablations.main --config
 |------|------|
 | `src/gom/ablations/main.py` | CLI entry point; loads YAML, builds the VQA dataset, dispatches to the three experiment types below |
 | `src/gom/ablations/ablate_preprocessing.py` | `generate_ablated_dataset` / `generate_default_dataset` — pre-renders GoM images once per config, cached on disk (skipped on rerun unless `force_reprocess: true`) |
-| `src/gom/ablations/run_experiments.py` | `run_ablation_experiments`, `run_vlm_comparison`, `run_prompting_experiments` — loads each model once, runs `n_runs` repeats, writes `summary_metrics.json` (mean/std) per config |
-| `src/gom/ablations/models.py` | `OllamaVLM` / `VllmVLM` wrappers + `parse_model_entry`; **imports both `ollama` and `vllm` unconditionally at module level**, so both packages must be installed regardless of which `backend` a config selects. `VllmVLM(quantize_fp8=True)` passes `quantization="fp8"` to vLLM (on-the-fly FP8, ~halves the weight footprint; bf16 path unchanged when `False`). `parse_model_entry` normalizes each `models:` list item to `(name, quantize_fp8)` — see per-model FP8 below |
-| `src/gom/ablations/prompts.py` | `build_prompt_template` — the four prompting strategies (`baseline`, `few_shot`, `chain_of_thought`, `graph_guided`); add a new strategy here first, then reference it by name in a config's `strategies:` block |
+| `src/gom/ablations/run_experiments.py` | `run_ablation_experiments`, `run_vlm_comparison`, `run_prompting_experiments` — loads each model once, runs `n_runs` repeats, writes `summary_metrics.json` (mean/std) per config. Scores with `evaluate_vqa` from `evaluation.py` (**not** the old `runner.evaluate`) — see "VQA evaluation & answer scoring" below. All three iterate **models as the outer loop** and call `models.release_model(current_model)` at the end of each model's iteration to free its VRAM before the next model loads — see "VRAM lifecycle across models" below |
+| `src/gom/ablations/evaluation.py` | Correct VQA scorer used by `run_experiments.py`: `extract_final_answer` (strips reasoning traces), `normalize_vqa_answer` (official VQA normalization), `vqa_soft_accuracy` (official 10-answer soft metric), `evaluate_vqa` (drop-in replacement for `runner.evaluate`). Added to fix reasoning-model scoring without touching `gom.vqa.runner`; see the dedicated section below |
+| `src/gom/ablations/models.py` | `OllamaVLM` / `VllmVLM` wrappers + `parse_model_entry`; **imports both `ollama` and `vllm` unconditionally at module level**, so both packages must be installed regardless of which `backend` a config selects. `VllmVLM(quantize_fp8=True)` passes `quantization="fp8"` to vLLM (on-the-fly FP8, ~halves the weight footprint; bf16 path unchanged when `False`). `parse_model_entry` normalizes each `models:` list item to `(name, quantize_fp8)` — see per-model FP8 below. **Auto-raises the generation cap for reasoning models** (`is_reasoning_model` / `resolve_max_tokens`: 2048 tokens vs 512 default; `OllamaVLM` also widens `num_ctx` to 16384) so a `<think>` trace + answer is not truncated — see VQA evaluation below. Both wrappers expose a `shutdown()`, and the module offers `release_model(model)` — the explicit VRAM teardown used between models; see "VRAM lifecycle across models" below |
+| `src/gom/ablations/prompts.py` | `build_prompt_template` — the four prompting strategies (`baseline`, `few_shot`, `chain_of_thought`, `graph_guided`); add a new strategy here first, then reference it by name in a config's `strategies:` block. Every template ends with an `Answer:` marker so the answer extractor has a reliable split point; none forbids reasoning (see VQA evaluation below) |
 | `src/gom/ablations/utils.py` | `update_cfg_correct` (in-place `PreprocessorConfig` patching to avoid reloading models), `run_preprocessing` |
 
 ### Config structure
@@ -179,10 +180,47 @@ generation, scale, architecture, and reasoning axes:
   CoT/graph_guided prompting interacts with native reasoning.
 
 Note: there is **no** `Qwen3.5-VL` (Qwen3.5 is text-only); `Qwen3-VL` is the
-current multimodal Qwen. **Reasoning/Thinking models emit reasoning tokens
-before the answer**, but `gom.vqa.runner.evaluate` does string exact-match — so
-LlamaV-o1 and any `*-Thinking` model need answer extraction or their scores are
-understated; verify this before trusting those runs.
+current multimodal Qwen. **Reasoning/Thinking models (LlamaV-o1, any
+`*-Thinking`) emit reasoning tokens before the answer.** This *was* a
+correctness risk because `gom.vqa.runner.evaluate` does a bare string
+exact-match, which scores the reasoning trace verbatim and understates those
+models. It is now handled by `ablations/evaluation.py` (answer extraction +
+official VQA scoring) and the reasoning-aware `max_tokens` / prompt changes —
+see "VQA evaluation & answer scoring" below. `runner.evaluate` itself is left
+unchanged; the ablations code no longer calls it.
+
+### VRAM lifecycle across models (`run_experiments.py` → `models.release_model`)
+
+All three runners load **one model at a time** — the `models:` list is the
+**outermost** loop, so a model's weights are loaded once (`VllmVLM.__init__` /
+`OllamaVLM`) and reused across every ablation grid point / strategy / `n_runs`
+repeat, then the loop advances to the next model. Models are **never**
+co-resident in VRAM by design; per-model FP8 sizing targets a single model +
+KV cache on one 24 GB card, not the sum of all models.
+
+The catch is that reassigning `current_model` to the next model does **not**
+free the previous one: vLLM keeps the CUDA context, KV-cache blocks and NCCL
+state alive until the process exits, regardless of Python GC — so without an
+explicit teardown two models can briefly sit in VRAM at a model transition and
+OOM. Each outer-loop iteration therefore ends with
+`release_model(current_model); current_model = None`:
+
+- `release_model(model)` (in `models.py`) calls the wrapper's `shutdown()`,
+  then `gc.collect()` + `torch.cuda.empty_cache()` **in that order** (flushing
+  the cache only reclaims blocks the engine has already released). It is
+  best-effort and exception-safe — cleanup never aborts a run.
+- `VllmVLM.shutdown()` drops the engine's executor refs (`llm_engine.model_executor`
+  for V0 / `llm_engine.engine_core` for V1 — best-effort, version-dependent),
+  nulls `self.llm`, then calls `destroy_model_parallel()` /
+  `destroy_distributed_environment()`. Idempotent via a `_is_shutdown` guard.
+- `OllamaVLM.shutdown()` is a daemon nudge, not an in-process free: Ollama
+  serves models from its own process, so the wrapper holds no GPU memory; it
+  just issues `ollama.generate(..., keep_alive=0)` to unload the model now
+  instead of after its keep-alive window.
+
+Because cleanup runs at the end of **every** model iteration (including the
+last), it also frees the final model between the experiment types `main.py`
+runs back-to-back in one process (ablations → vlm_comparison → prompting).
 
 ### Data loading — how the VQA examples are built (`main.py::build_vqa_examples`)
 
@@ -199,9 +237,10 @@ older two-file VQAv2-style format, so ignore any lingering references to
 turns each record into a `gom.vqa.types.VQAExample`:
 
 - **`answer`** = VQA-style **majority vote** over the 10 `answers`
-  (`_majority_answer`, ties → first occurrence), because the evaluator
-  `gom.vqa.runner.evaluate` does a single-string case-insensitive exact match.
-  The full list is preserved in `metadata["answers"]` for richer scoring later.
+  (`_majority_answer`, ties → first occurrence). The full list is preserved in
+  `metadata["answers"]` and is what the scorer actually uses: `evaluate_vqa`
+  computes the official soft VQA accuracy over all 10, and falls back to the
+  majority only for the strict exact-match number (see VQA evaluation below).
 - **`image_id`** = filename stem (e.g. `COCO_train2014_000000487025`); used to
   count unique images and to apply `num_examples` (which subsamples by unique
   image, keeping all questions of the chosen images).
@@ -227,6 +266,79 @@ local files, every other node fetches over HTTP from node 40's
 `python3 -m http.server`. Full operational writeup in `README_SLURM.md` §2.1.
 No Docker change is needed (default bridge networking reaches node 40;
 `requests` is already installed).
+
+### VQA evaluation & answer scoring (`main.py::build_vqa_examples` → `evaluation.py`)
+
+The ablations score VQA answers with `gom.ablations.evaluation.evaluate_vqa`,
+**not** the legacy `gom.vqa.runner.evaluate`. All three runners in
+`run_experiments.py` import and call `evaluate_vqa`; `runner.evaluate` (a bare
+case-insensitive exact match against the single majority answer) is left in
+place but unused by the ablations. This exists to fix two correctness problems
+without editing anything outside `src/gom/ablations/`:
+
+1. **Reasoning-model output vs exact match.** `LlamaV-o1` and any `*-Thinking`
+   model emit a reasoning trace (often inside `<think>...</think>`) before the
+   answer. `run_vqa` only trims output when the literal token `Answer:` is
+   present, so the trace was being scored verbatim → those models were
+   systematically understated.
+2. **The official VQA metric is not exact string match.** The paper evaluates
+   VQAv1/VQAv2 with the *official protocol* (Antol 2015 / Goyal 2017): canonical
+   answer normalization + a **soft** score `min(1, #humans_who_said_it / 3)`
+   averaged over the ten leave-one-out subsets of the 10 human answers — not a
+   single-string comparison.
+
+**How it works (all in `evaluation.py`):**
+- `extract_final_answer(raw)` — strips `<think>...</think>` blocks (closed or
+  dangling), then keeps the text after the **last** answer marker (`Answer:` /
+  `Final answer:` / `The answer is`), else falls back to the last non-empty
+  line; trims quotes/markdown/trailing punctuation. **Idempotent and a no-op on
+  ordinary short answers** (`red`→`red`), so non-reasoning models are unaffected.
+  The raw, un-extracted model output is still stored in `raw_results.json` for
+  debugging the traces.
+- `normalize_vqa_answer(s)` — the official VQA `processPunctuation` /
+  `processDigitArticle` normalization (lowercase, punctuation, articles a/an/the,
+  number-words→digits, contractions), ported from the VQA eval toolkit.
+- `vqa_soft_accuracy(pred, human_answers)` — the official leave-one-out soft
+  accuracy over the 10 answers (falls back to normalized exact match when <10
+  answers are present).
+- `evaluate_vqa(results)` — drop-in for `runner.evaluate`. Returns
+  `vqa_accuracy` (official soft, 0–100, **the headline metric** — surfaced as
+  `acc` / `mean_accuracy` in `summary_metrics.json`), plus `exact`/`exact_percent`
+  (stricter normalized exact-match vs the majority answer, kept as a lower bound)
+  and `avg_time`. Reads the 10 answers from each record's
+  `metadata["answers"]` (put there by `build_vqa_examples`).
+
+**Supporting changes (also in `src/gom/ablations/`):**
+- **`max_tokens` is reasoning-aware** (`models.py`). `is_reasoning_model(name)`
+  (name substrings: `thinking`, `-o1`, `reasoning`, `r1`, `qvq`, `cot`, …) and
+  `resolve_max_tokens` give reasoning models **2048** generation tokens vs the
+  **512** default, so a long `<think>` trace plus the final answer is not cut
+  off (which would otherwise be scored as empty). `OllamaVLM` also widens
+  `num_ctx` to 16384 for those models. Both wrappers accept an explicit
+  `max_tokens=` override. Detection is name-based, so a thinking model whose
+  repo id lacks an obvious keyword defaults to 512 — use the override for that.
+  Note: `google/gemma-4-12B-it` is an instruction-tuned model, **not** a
+  reasoning model, so it correctly stays at 512.
+- **Prompts request a concise, parseable answer without forbidding reasoning.**
+  The shared `multimodal_prompt` / `system_prompt` in `main.py` and the four
+  templates in `prompts.py` ask the model to *conclude* with
+  `Answer: <one word or a short phrase>` and end each template with an `Answer:`
+  marker (the extractor's split point). They deliberately **do not** forbid
+  explanation and **do not** end the whole prompt with a trailing `Answer:` that
+  would pre-empt a reasoning model's thinking — that would cripple LlamaV-o1 /
+  `*-Thinking` and contradict `chain_of_thought` prompting. This aligns every
+  run with the official metric's short-answer assumption while leaving reasoning
+  intact.
+
+**Known limitation (by design).** Extraction recovers a concise answer when the
+model ends with a marker or a short final line (which the prompts now request).
+It intentionally does **not** try to distil a short answer out of an arbitrary
+free-form sentence (e.g. "The bowl is in the top part of the image." is *not*
+matched to gold `top`) — that would need an LLM judge and could silently
+inflate/deflate scores. The mitigation is prompting for terse answers, not
+fuzzy matching. If a future model still answers in sentences, a conservative,
+negation-aware containment fallback could be added to `evaluate_vqa`, but it is
+not implemented.
 
 ## Docker / SLURM Cluster Setup
 

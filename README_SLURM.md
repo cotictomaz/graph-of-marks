@@ -71,14 +71,15 @@ git clone https://github.com/<you>/graph-of-marks.git
 cd graph-of-marks
 # on later visits: git pull
 
-# 3. Put your dataset files somewhere under the repo so they're visible
-#    inside the container at /workspace (the repo root is bind-mounted there
-#    by run_docker.sh — see §4). Example layout:
-#    graph-of-marks/data/MultipleChoice_mscoco_val2014_questions.json
-#    graph-of-marks/data/mscoco_val2014_annotations.json
-#    graph-of-marks/data/val2014/*.jpg
-mkdir -p data
-# scp/WinSCP your VQA questions/annotations/images into data/ here
+# 3. Put your dataset JSON under the repo so it's visible inside the container
+#    at /workspace (the repo root is bind-mounted there by run_docker.sh — see
+#    §4). The dataset is now a SINGLE flat JSON list of records, each
+#    {image_path (basename only), question, answers: [...]}:
+#    graph-of-marks/vqav1_limited_1000.json
+#
+#    The images themselves live ONLY on node 40 (faretra). You do NOT copy the
+#    ~19 GB image folder to every node — see §2.1 for how other nodes fetch the
+#    handful of images they need over HTTP from node 40.
 
 # 4. Build the image (WHEN: once per node, and again any time
 #    build/Dockerfile, build/Dockerfile.rtx5090, or build/requirements.txt
@@ -109,6 +110,54 @@ changed.
 
 You do **not** rebuild when you only edit `slurm_configs/*.yaml` or the
 Python source under `src/gom/` — see next section.
+
+---
+
+## 2.1 Images live only on node 40 — how other nodes get them
+
+The dataset JSON (`vqav1_limited_1000.json`) only stores image **basenames**
+(e.g. `COCO_train2014_000000487025.jpg`); the actual `.jpg` files live **only
+on node 40 (faretra)**. Because there is no shared filesystem (guide §7), a
+job that SLURM lands on node 43/153/232 cannot see node 40's disk. Rather than
+copying the whole ~19 GB image folder to every node, node 40 **serves the
+images over HTTP** and other nodes fetch (and locally cache) only the ~1000
+images they actually use.
+
+`src/gom/ablations/main.py::build_vqa_examples` resolves each image, per node,
+in this order: **(1)** a local file at `images_dir/<basename>` (node 40) →
+**(2)** a file already in `image_cache_dir/<basename>` (fetched on a previous
+run) → **(3)** download `images_base_url/<basename>` into `image_cache_dir`.
+Whatever it resolves, it hands the rest of the pipeline a normal local path,
+so preprocessing/caching/evaluation are identical on every node.
+
+**One-time setup on node 40 — start the image server** (host side, outside the
+container; run it in a `byobu`/`tmux` session so it survives your SSH logout):
+
+```bash
+# on node 40 (faretra), in the directory that contains the COCO_train2014_*.jpg files
+cd /path/to/train2014
+python3 -m http.server 8000            # serves http://137.204.107.40:8000/<basename>.jpg
+# quick check from another node:  curl -sI http://137.204.107.40:8000/COCO_train2014_000000487025.jpg
+```
+
+**Then, per config:**
+
+- Running **on node 40**: set `images_dir` to the local image folder and leave
+  `images_base_url: ""` — nothing is downloaded.
+- Running **on any other node**: set
+  `images_base_url: "http://137.204.107.40:8000"`. The `images_dir` value is
+  harmless there (it just won't exist, so resolution falls through to the
+  download). Fetched images are cached under `image_cache_dir` (default
+  `{base_dir}/image_cache`, which is under the bind-mounted `/workspace`, so
+  they persist on that node and are reused across grid points and reruns).
+
+**Docker networking:** no change to `run_docker.sh` or the Dockerfiles is
+needed. The container's default bridge network already allows outbound HTTP to
+`137.204.107.40`, and `requests` (used to download) is already installed. Only
+if your node blocks Docker's bridge NAT would you add `--network host` to the
+`docker run` in `run_docker.sh`. The image cache dir must stay under
+`/workspace` (the default does) so it's writable and survives the `--rm`
+container.
 
 ---
 
@@ -206,13 +255,15 @@ n_runs: 3              # repeat each (model, config) combination this many times
 num_examples: -1       # -1 = full dataset, or an integer to subsample (unique images)
 force_reprocess: false # true = regenerate preprocessed images even if the folder already exists
 
-questions_path: "/workspace/data/....questions.json"
-annotations_path: "/workspace/data/....annotations.json"
-images_dir: "/workspace/data/val2014"
+dataset_path: "/workspace/vqav1_limited_1000.json"   # single flat VQAv1 JSON (list of {image_path, question, answers})
+images_dir: "/workspace/data/train2014"              # local images — used only on node 40
+images_base_url: ""    # "" on node 40; "http://137.204.107.40:8000" on every other node (see §2.1)
+image_cache_dir: ""    # "" ⇒ {base_dir}/image_cache (must be under /workspace)
 ```
 
 Use `/workspace/...` paths (the bind-mounted project dir) for anything you
-want visible inside the container. Model checkpoints (e.g.
+want visible inside the container. See §2.1 for the `images_dir` /
+`images_base_url` / `image_cache_dir` split (images live only on node 40). Model checkpoints (e.g.
 `"Qwen/Qwen2.5-VL-7B-Instruct"`) are Hugging Face repo IDs — vllm downloads
 them into `HF_HOME=/llms` (the shared cluster cache), so if a colleague
 already pulled the same model you won't re-download it (see the guide's
