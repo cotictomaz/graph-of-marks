@@ -294,7 +294,8 @@ sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/my_expe
 base_dir: "/workspace/ablation_studies/<name>"   # where preprocessed images + results are written
 backend: "vllm"        # "vllm" (recommended on the cluster) or "ollama" (needs a local Ollama server — not available here)
 n_runs: 3              # repeat each (model, config) combination this many times, report mean/std
-num_examples: -1       # -1 = full dataset, or an integer to subsample (unique images)
+num_images: -1         # how many unique images to keep; -1 = full dataset (legacy alias: num_examples)
+questions_per_image: -1 # how many questions to keep per kept image; -1 = all questions for that image
 force_reprocess: false # true = regenerate preprocessed images even if the folder already exists
 
 dataset_path: "/workspace/vqav1_limited_1000.json"   # single flat VQAv1 JSON (list of {image_path, question, answers})

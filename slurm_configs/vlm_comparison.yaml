@@ -9,7 +9,8 @@
 base_dir: "/workspace/ablation_studies/vlm_comparison"
 backend: "vllm"
 n_runs: 3
-num_examples: -1
+num_images: -1        # how many unique images to keep; -1 = all images
+questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 force_reprocess: false
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).

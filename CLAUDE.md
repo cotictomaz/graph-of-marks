@@ -242,12 +242,30 @@ turns each record into a `gom.vqa.types.VQAExample`:
   computes the official soft VQA accuracy over all 10, and falls back to the
   majority only for the strict exact-match number (see VQA evaluation below).
 - **`image_id`** = filename stem (e.g. `COCO_train2014_000000487025`); used to
-  count unique images and to apply `num_examples` (which subsamples by unique
-  image, keeping all questions of the chosen images).
+  count unique images and to apply the two subsampling knobs `num_images` /
+  `questions_per_image` (see below).
 - **`metadata`** = `{"answers": [...], "image_file": <basename>, "dataset": "vqav1"}`.
 - **`image_path`** = a **resolved local absolute path** (see below), so every
   downstream stage (basename+question-hash preprocessing caches, image
   grouping, `evaluate`) is oblivious to where the image came from.
+
+**Dataset subsampling (`num_images` + `questions_per_image`).** After the full
+dataset is built, `main.py` subsamples it with two **independent** global knobs:
+- **`num_images`** — how many **unique images** to keep, in first-seen order
+  (`-1` = all images). This is the renamed `num_examples`; the old key is still
+  read as a fallback (`cfg.get("num_images", cfg.get("num_examples", -1))`) so
+  existing configs don't break, but new configs should use `num_images`.
+- **`questions_per_image`** — how many **questions to keep per kept image**, in
+  first-seen order (`-1` = all questions for that image; default).
+
+The two compose: `num_images: 5, questions_per_image: 2` keeps 5 images × up to
+2 questions = up to 10 examples. Setting `num_images: -1, questions_per_image: 1`
+keeps one question for **every** image (the old `num_examples`'s accidental
+behaviour, now opt-in). The selection scans the whole flat list (no early
+`break`) because a selected image's questions are not guaranteed contiguous.
+Note this replaced the previous behaviour where `num_examples` silently kept
+only the **first** question of each selected image — `questions_per_image: -1`
+(the default) now keeps them all.
 
 **Image resolution / the node-40 problem** (`_resolve_local_image`): the JSON
 stores only basenames, and the actual `.jpg` files live **only on node 40

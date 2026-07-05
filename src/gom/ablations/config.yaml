@@ -4,7 +4,8 @@
 base_dir: "/content/drive/MyDrive/BDTM/gablation_studies"
 backend: "vllm"       # "ollama" or "vllm"
 n_runs: 2
-num_examples: 3       # -1 to use the full dataset
+num_images: 3         # how many unique images to keep; -1 = all images
+questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 force_reprocess: true # if true, overwrites existing preprocessed images
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).

@@ -292,7 +292,11 @@ def main():
     logger.info("Config file: %s", args.config)
     backend          = cfg.get("backend", "ollama")
     n_runs           = cfg.get("n_runs", 3)
-    num_examples     = cfg.get("num_examples", -1)
+    # num_images         : how many unique images to keep      (-1 = all images).
+    # questions_per_image: how many questions to keep per image (-1 = all questions).
+    # ``num_examples`` is the legacy name for ``num_images`` and is still honoured.
+    num_images       = cfg.get("num_images", cfg.get("num_examples", -1))
+    questions_per_image = cfg.get("questions_per_image", -1)
     force_reprocess  = cfg.get("force_reprocess", False)
     dataset_path     = cfg.get("dataset_path")
     images_dir       = cfg.get("images_dir")
@@ -344,7 +348,8 @@ def main():
         "base_dir": base_dir,
         "backend": backend,
         "n_runs": n_runs,
-        "num_examples": num_examples,
+        "num_images": num_images,
+        "questions_per_image": questions_per_image,
         "force_reprocess": force_reprocess,
         "dataset_path": dataset_path,
         "images_dir": images_dir,
@@ -368,24 +373,45 @@ def main():
     logger.info("Dataset built: %d VQA examples from %d unique images.",
                 len(dataset), len({ex.image_id for ex in dataset}))
 
-    if num_examples > 0:
+    # Subsample by unique image and (independently) by questions per image.
+    #   • num_images > 0          → keep only the first ``num_images`` distinct
+    #     images (in first-seen order); -1 keeps every image.
+    #   • questions_per_image > 0 → within each kept image, keep at most that
+    #     many questions (in first-seen order); -1 keeps every question.
+    # The flat dataset holds several questions per image, and they are not
+    # guaranteed to be contiguous, so we scan the whole list rather than
+    # breaking early: an already-selected image may reappear later.
+    if num_images > 0 or questions_per_image > 0:
         dataset_examples = []
-        seen_ids = set()
+        seen_ids: set[str] = set()
+        per_image_count: dict[str, int] = {}
         for ex in dataset:
-            if ex.image_id not in seen_ids:
-                dataset_examples.append(ex)
-                seen_ids.add(ex.image_id)
-            if len(dataset_examples) >= num_examples:
-                break
-        print(f"✂️  Dataset limitato a {num_examples} immagini uniche.")
+            img = ex.image_id
+            if img not in seen_ids:
+                # A new image: admit it only if we still have image budget.
+                if num_images > 0 and len(seen_ids) >= num_images:
+                    continue
+                seen_ids.add(img)
+                per_image_count[img] = 0
+            # ``img`` is now a selected image — enforce the per-image quota.
+            if questions_per_image > 0 and per_image_count[img] >= questions_per_image:
+                continue
+            dataset_examples.append(ex)
+            per_image_count[img] += 1
+        print(
+            f"✂️  Dataset limitato a {len(seen_ids)} immagini uniche"
+            f" (num_images={num_images}, questions_per_image={questions_per_image})"
+            f" → {len(dataset_examples)} esempi."
+        )
     else:
         dataset_examples = dataset
         print(f"📊 Utilizzo dell'intero dataset: {len(dataset_examples)} esempi.")
 
     n_unique_images = len({ex.image_id for ex in dataset_examples})
     logger.info(
-        "Dataset in use: %d examples across %d unique images (num_examples=%d).",
-        len(dataset_examples), n_unique_images, num_examples,
+        "Dataset in use: %d examples across %d unique images "
+        "(num_images=%d, questions_per_image=%d).",
+        len(dataset_examples), n_unique_images, num_images, questions_per_image,
     )
 
     # Initialize the shared preprocessor only when at least one preprocessing phase will run.

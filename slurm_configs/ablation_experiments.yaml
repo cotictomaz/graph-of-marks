@@ -14,7 +14,8 @@
 base_dir: "/workspace/ablation_studies/ablations"
 backend: "vllm"       # cluster nodes have no Ollama server running; use vllm
 n_runs: 3
-num_examples: -1      # -1 to use the full dataset
+num_images: -1        # how many unique images to keep; -1 = all images
+questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 
 # Set to true only when the ablation_grid or preprocessing pipeline changed
 # since the last run; it overwrites the existing preprocessed images.
