@@ -43,9 +43,43 @@ if [ -z "${HF_TOKEN:-}" ]; then
     done
 fi
 
+# Host path to the source image dataset (node 40 / faretra only). The images
+# live OUTSIDE the repo and /llms, in a dedicated dataset directory, so they
+# must be bind-mounted explicitly here. This is what makes the config's
+# `images_dir: /images` resolve on node 40; on any other node the path won't
+# exist, the mount is skipped, and the pipeline fetches images over HTTP
+# (images_base_url) instead. Set it ONCE PER NODE (node 40), e.g.:
+#     echo /datasets/VisualQA_Datasets/Preprocessing/VQAV1/original_VQAV1/vqav1_images > ~/.gom_images_dir
+# Precedence: 1. GOM_IMAGES_DIR in the environment;  2. ~/.gom_images_dir;
+#             3. $PHYS_DIR/.gom_images_dir.local (git-ignored).
+if [ -z "${GOM_IMAGES_DIR:-}" ]; then
+    for _img_file in "$HOME/.gom_images_dir" "$PHYS_DIR/.gom_images_dir.local"; do
+        [ -r "$_img_file" ] || continue
+        GOM_IMAGES_DIR="$(tr -d ' \t\r\n' < "$_img_file")"
+        break
+    done
+fi
+
+# Mount the images read-only at a FIXED container path (/images) so the YAML's
+# images_dir is identical on every node regardless of the host location. Only
+# add the mount when the directory actually exists on this node — mounting a
+# nonexistent host path would make Docker create an empty dir and silently
+# re-break image resolution (node 40 would then look local, find nothing, and
+# never fall back to HTTP).
+IMAGES_MOUNT=()
+if [ -n "${GOM_IMAGES_DIR:-}" ]; then
+    if [ -d "$GOM_IMAGES_DIR" ]; then
+        IMAGES_MOUNT=(-v "$GOM_IMAGES_DIR":/images:ro)
+        echo "🖼️  Mounting images (ro): $GOM_IMAGES_DIR -> /images"
+    else
+        echo "⚠️  GOM_IMAGES_DIR=$GOM_IMAGES_DIR is not a directory on this node; skipping the images mount (will rely on images_base_url)." >&2
+    fi
+fi
+
 docker run \
     -v "$PHYS_DIR":/workspace \
     -v "$LLM_CACHE_DIR":"$DOCKER_INTERNAL_CACHE_DIR" \
+    "${IMAGES_MOUNT[@]}" \
     -e HF_HOME="$DOCKER_INTERNAL_CACHE_DIR" \
     -e HF_TOKEN \
     --rm \

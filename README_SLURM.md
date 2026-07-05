@@ -146,26 +146,52 @@ run) → **(3)** download `images_base_url/<basename>` into `image_cache_dir`.
 Whatever it resolves, it hands the rest of the pipeline a normal local path,
 so preprocessing/caching/evaluation are identical on every node.
 
-**One-time setup on node 40 — start the image server** (host side, outside the
-container; run it in a `byobu`/`tmux` session so it survives your SSH logout):
+> **Important — the images are *not* under the repo.** On node 40 the images
+> live in a dedicated dataset directory
+> (e.g. `/datasets/VisualQA_Datasets/Preprocessing/VQAV1/original_VQAV1/vqav1_images`),
+> **outside** the bind-mounted project dir. The container only sees `/workspace`
+> (the repo) and `/llms` by default, so that directory must be **bind-mounted
+> explicitly**. `run_docker.sh` does this: it mounts `$GOM_IMAGES_DIR` read-only
+> at the fixed container path **`/images`**, which is why every config sets
+> `images_dir: "/images"`. Point `images_dir` at a path under `/workspace` only
+> if you have actually staged the images inside the repo (you normally
+> shouldn't — that's the ~19 GB you're avoiding).
+
+**One-time setup on node 40 — (a) tell `run_docker.sh` where the images are.**
+Record the host image directory once; `run_docker.sh` reads it and bind-mounts
+it read-only at `/images` (skipped automatically on nodes where the path
+doesn't exist). Precedence: `GOM_IMAGES_DIR` env var → `~/.gom_images_dir` →
+`$PHYS_DIR/.gom_images_dir.local` (git-ignored).
+
+```bash
+# on node 40 (faretra) — set once, survives logout, never committed
+echo /datasets/VisualQA_Datasets/Preprocessing/VQAV1/original_VQAV1/vqav1_images > ~/.gom_images_dir
+# sanity check: the mount should list the COCO_train2014_*.jpg files
+docker run --rm -v "$(cat ~/.gom_images_dir)":/images:ro gom:latest ls /images | head
+```
+
+**One-time setup on node 40 — (b) start the image server** for the *other*
+nodes to fetch from (host side, outside the container; run it in a
+`byobu`/`tmux` session so it survives your SSH logout):
 
 ```bash
 # on node 40 (faretra), in the directory that contains the COCO_train2014_*.jpg files
-cd /path/to/train2014
+cd /datasets/VisualQA_Datasets/Preprocessing/VQAV1/original_VQAV1/vqav1_images
 python3 -m http.server 8000            # serves http://137.204.107.40:8000/<basename>.jpg
 # quick check from another node:  curl -sI http://137.204.107.40:8000/COCO_train2014_000000487025.jpg
 ```
 
-**Then, per config:**
+**Then, per config (`images_dir` is always `/images` — the mount target):**
 
-- Running **on node 40**: set `images_dir` to the local image folder and leave
-  `images_base_url: ""` — nothing is downloaded.
-- Running **on any other node**: set
-  `images_base_url: "http://137.204.107.40:8000"`. The `images_dir` value is
-  harmless there (it just won't exist, so resolution falls through to the
-  download). Fetched images are cached under `image_cache_dir` (default
-  `{base_dir}/image_cache`, which is under the bind-mounted `/workspace`, so
-  they persist on that node and are reused across grid points and reruns).
+- Running **on node 40**: keep `images_dir: "/images"` (provided by the mount
+  from step (a)) and leave `images_base_url: ""` — nothing is downloaded.
+- Running **on any other node**: leave `images_dir: "/images"` as-is (the mount
+  isn't added there, so `/images` simply won't exist and resolution falls
+  through to the download) and set
+  `images_base_url: "http://137.204.107.40:8000"`. Fetched images are cached
+  under `image_cache_dir` (default `{base_dir}/image_cache`, which is under the
+  bind-mounted `/workspace`, so they persist on that node and are reused across
+  grid points and reruns).
 
 **Docker networking:** no change to `run_docker.sh` or the Dockerfiles is
 needed. The container's default bridge network already allows outbound HTTP to
@@ -272,7 +298,7 @@ num_examples: -1       # -1 = full dataset, or an integer to subsample (unique i
 force_reprocess: false # true = regenerate preprocessed images even if the folder already exists
 
 dataset_path: "/workspace/vqav1_limited_1000.json"   # single flat VQAv1 JSON (list of {image_path, question, answers})
-images_dir: "/workspace/data/train2014"              # local images — used only on node 40
+images_dir: "/images"  # node-40 mount target; run_docker.sh bind-mounts $GOM_IMAGES_DIR here (see §2.1)
 images_base_url: ""    # "" on node 40; "http://137.204.107.40:8000" on every other node (see §2.1)
 image_cache_dir: ""    # "" ⇒ {base_dir}/image_cache (must be under /workspace)
 ```
@@ -467,6 +493,13 @@ changed `build/Dockerfile` or `build/requirements.txt`.
 - **Job fails immediately with a missing-file error** — the code, image, or
   dataset files under `data/` don't exist on the node SLURM picked. Re-run
   `git pull` and `docker build` on that specific node (guide §7).
+- **`RuntimeError: Nessuna sorgente immagini disponibile` (or all records
+  skipped) on node 40** — the image dataset directory isn't mounted. `run_docker.sh`
+  only mounts it at `/images` when `GOM_IMAGES_DIR` (or `~/.gom_images_dir` /
+  `$PHYS_DIR/.gom_images_dir.local`) points at an **existing** directory on that
+  node. Set it (see §2.1 step (a)) and confirm the `🖼️  Mounting images` line
+  appears in `slurm-<job_id>.out`. On any node that is **not** node 40, set
+  `images_base_url` instead — there is no local mount there.
 - **`ImportError: vllm`/`ollama` inside the container** — you built the
   image before `build/requirements.txt` included these packages, or edited
   requirements without rebuilding; run `docker build` again.

@@ -126,6 +126,40 @@ def build_vqa_examples(
             f"File: {dataset_path}"
         )
 
+    # Fail fast with an actionable message when there is provably NO image
+    # source, instead of silently skipping every record and raising a generic
+    # error at the end. Sources, in resolution order (see _resolve_local_image):
+    #   1. images_dir      — local dir (node 40; bind-mounted at /images)
+    #   2. image_cache_dir — images fetched on a previous run (counted only if
+    #                        it already holds files: a bare default path isn't a
+    #                        source)
+    #   3. images_base_url — HTTP download from node 40
+    # Raising only when none of the three can serve an image means this never
+    # false-positives on a legitimate local/HTTP/warm-cache run.
+    def _dir_has_files(path) -> bool:
+        if not path:
+            return False
+        try:
+            with os.scandir(path) as it:
+                return any(True for _ in it)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+
+    have_local = bool(images_dir) and os.path.isdir(images_dir)
+    have_http = bool(images_base_url)
+    have_cache = _dir_has_files(image_cache_dir)
+    if not (have_local or have_http or have_cache):
+        raise RuntimeError(
+            "Nessuna sorgente immagini disponibile:\n"
+            f"  • images_dir={images_dir!r}: assente o non è una directory nel container.\n"
+            f"  • image_cache_dir={image_cache_dir!r}: assente o vuota.\n"
+            f"  • images_base_url={images_base_url!r}: non impostato.\n"
+            "→ Su node 40 (faretra): imposta GOM_IMAGES_DIR (o ~/.gom_images_dir) così che "
+            "run_docker.sh monti il dataset immagini su /images (README_SLURM.md §2.1).\n"
+            "→ Su ogni altro nodo: imposta images_base_url al server immagini di node 40 "
+            "(es. http://137.204.107.40:8000)."
+        )
+
     if images_base_url:
         print(f"🌐 Immagini servite via HTTP da: {images_base_url} → cache: {image_cache_dir}")
     if images_dir:
@@ -174,8 +208,12 @@ def build_vqa_examples(
         print(f"⚠️  {missing} record saltati: immagine non trovata né scaricabile.")
     if not examples:
         raise RuntimeError(
-            "Nessuna immagine risolta. Verifica 'images_dir' (nodo 40) oppure "
-            "'images_base_url'/'image_cache_dir' (altri nodi) nel file di config."
+            "Nessuna immagine risolta (tutti i record saltati). Verifica che i basename "
+            "del JSON esistano nella sorgente configurata:\n"
+            f"  • node 40 (faretra): il mount /images ({images_dir!r}) deve contenere i .jpg — "
+            "controlla GOM_IMAGES_DIR / ~/.gom_images_dir (README_SLURM.md §2.1);\n"
+            f"  • altri nodi: images_base_url ({images_base_url!r}) deve puntare al server "
+            "immagini di node 40 e i file devono essere scaricabili."
         )
     return examples
 

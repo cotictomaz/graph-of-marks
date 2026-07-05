@@ -56,3 +56,6 @@ scripts_test/
 # Hugging Face access token (never commit secrets)
 .hf_token
 .hf_token.local
+# Node-local image dataset path (machine-specific; never commit)
+.gom_images_dir
+.gom_images_dir.local

@@ -554,8 +554,8 @@ class PreprocessorConfig:
     show_bboxes: bool = True  # Show bounding boxes
     show_confidence: bool = False  # Display confidence scores in labels
     color_edge: str = "head"
-    label_bbox_linewidth: float = 3.0
-    relation_label_bbox_linewidth: float = 3.0
+    label_bbox_linewidth: float = 2.0
+    relation_label_bbox_linewidth: float = 2.0
     connector_linewidth: float = 1.5
 
     # Auto-scaling for different image sizes/resolutions
