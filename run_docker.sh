@@ -26,7 +26,25 @@ set -euo pipefail
 # line. Alternatively pre-stage the weights once into /llms so no token is needed.
 
 IMAGE_NAME="${GOM_IMAGE_NAME:-gom:latest}"
-PHYS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the project directory (bind-mounted at /workspace). Under `sbatch`,
+# SLURM copies this script to its spool dir and runs it from there, so
+# ${BASH_SOURCE[0]} points at /var/spool/slurmd/job*/slurm_script — NOT the
+# repo — and mounting its dirname yields a /workspace with no train.sh (exit
+# 127). Precedence: GOM_PROJECT_DIR override → SLURM_SUBMIT_DIR (the dir sbatch
+# was launched from = the repo) → the script's own dir (direct srun/bash run).
+if [ -n "${GOM_PROJECT_DIR:-}" ]; then
+    PHYS_DIR="$GOM_PROJECT_DIR"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    PHYS_DIR="$SLURM_SUBMIT_DIR"
+else
+    PHYS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [ ! -f "$PHYS_DIR/train.sh" ]; then
+    echo "ERROR: train.sh not found in project dir '$PHYS_DIR'." >&2
+    echo "       Submit sbatch from the repo root, or set GOM_PROJECT_DIR:" >&2
+    echo "       export GOM_PROJECT_DIR=/home/cotic/graph-of-marks" >&2
+    exit 1
+fi
 LLM_CACHE_DIR="/llms"
 DOCKER_INTERNAL_CACHE_DIR="/llms"
 

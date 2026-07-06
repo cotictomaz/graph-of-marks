@@ -14,7 +14,7 @@
 base_dir: "/workspace/ablation_studies/ablations"
 backend: "vllm"       # cluster nodes have no Ollama server running; use vllm
 n_runs: 3
-num_images: -1        # how many unique images to keep; -1 = all images
+num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 
 # Set to true only when the ablation_grid or preprocessing pipeline changed
@@ -34,7 +34,7 @@ dataset_path: "/workspace/vqav1_limited_1000.json"
 #     images_base_url to node 40's HTTP image server; each image is fetched once
 #     into image_cache_dir and reused thereafter.
 images_dir: "/images"          # node-40 mount target (run_docker.sh -v "$GOM_IMAGES_DIR":/images:ro)
-images_base_url: ""            # e.g. "http://137.204.107.40:8000" when running off node 40
+images_base_url: "http://137.204.107.40:8000"   # off-faretra nodes fetch images over HTTP from node 40 (needs its http.server up)
 image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (must be under /workspace)
 
 # ==========================================
@@ -43,7 +43,7 @@ image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (mu
 ablations:
   enabled: true
   skip_preprocessing: false  # true = images already exist, skip straight to inference
-  run_vlm: true              # false = stop after preprocessing (useful to inspect images)
+  run_vlm: false             # false = stop after preprocessing (useful to inspect images)
 
   # Add/remove Hugging Face repo IDs to compare more models. Each model is
   # loaded once into GPU memory (vllm) and reused across all ablation_grid values.

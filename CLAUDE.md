@@ -166,6 +166,14 @@ e.g. `google/gemma-3-12b-it` is ~24 GB in bf16 (too tight for a 3090 with KV
 cache) but ~13 GB in FP8. FP8 is a no-op on the `ollama` backend (warned and
 ignored). Parsed by `gom.ablations.models.parse_model_entry`.
 
+> **⚠️ 2026-07-06: on-the-fly FP8 does NOT work on the RTX 3090 (Ampere / sm_86).**
+> Ampere has no hardware FP8, so vLLM emulates it via Marlin, which requires layer
+> dims divisible by 64 — Qwen3-VL fails with `RuntimeError: size_n = 4304 is not
+> divisible by tile_n_size = 64`. FP8 is only usable on the 5090 (or other
+> sm_89+/dim-aligned models); **on the 3090 use bf16.** All `fp8: true` was removed
+> from `vlm_comparison.yaml`. See the "Ablations end-to-end on faretra" session
+> section below for the full VRAM/token-budget picture.
+
 **Model selection (this study's choices; VQA only, no REC).** The paper used
 Qwen-2.5-VL-7B / Gemma-3-4B / LlamaV-o1-11B. The current configs extend along
 generation, scale, architecture, and reasoning axes:
@@ -178,6 +186,12 @@ generation, scale, architecture, and reasoning axes:
 - **`prompting_experiments`** — `Qwen3-VL-8B-Instruct` vs `Qwen3-VL-8B-Thinking`
   (reasoning off/on, identical weights) + `LlamaV-o1`, to isolate how
   CoT/graph_guided prompting interacts with native reasoning.
+
+> **⚠️ 2026-07-06 reality check (RTX 3090):** of the `vlm_comparison` set only
+> `InternVL3_5-8B` currently runs end-to-end on the 3090. `LlamaV-o1` (mllama)
+> won't serve on `vllm==0.11.0`, `gemma-3-12b` won't fit in bf16 (and FP8 is dead
+> on Ampere), and `Qwen3-VL-8B`'s ~16k-token GoM prompts don't fit its KV budget.
+> See the "Ablations end-to-end on faretra" session section for numbers.
 
 Note: there is **no** `Qwen3.5-VL` (Qwen3.5 is text-only); `Qwen3-VL` is the
 current multimodal Qwen. **Reasoning/Thinking models (LlamaV-o1, any
@@ -458,6 +472,143 @@ imports cleanly — i.e. the old cu124 `vllm==0.8.5` import failure is gone.
 This was the fix for that failure; the earlier `Dockerfile.rtx5090` (which
 kept `vllm==0.8.5` and only swapped torch to 2.7.1+cu128) would have produced
 a vLLM that could not import against the cu128 torch.
+
+## Ablations end-to-end on faretra — session findings & fixes (2026-07-06)
+
+Getting `slurm_configs/vlm_comparison.yaml` to actually run VLM inference on the
+RTX 3090 node (faretra) surfaced a chain of submission, code, and VRAM problems.
+This section records the final code state, the fixes, and the hard numbers so the
+next session doesn't re-derive them.
+
+### Submission / infrastructure
+
+- **`run_docker.sh` mounted the wrong dir under `sbatch` (exit 127).** It derived
+  the project dir from `${BASH_SOURCE[0]}`, but `sbatch` runs a *copy* of the
+  script from `/var/spool/slurmd/job*/slurm_script`, so `-v "$PHYS_DIR":/workspace`
+  bind-mounted the spool dir and the container died with
+  `/opt/nvidia/nvidia_entrypoint.sh: line 67: /workspace/train.sh: No such file`.
+  **Fix:** `PHYS_DIR` now resolves as `GOM_PROJECT_DIR` (env override) →
+  `SLURM_SUBMIT_DIR` (the dir `sbatch` was launched from) → the script's own dir,
+  with a fail-fast check that errors clearly if `$PHYS_DIR/train.sh` is missing.
+- **No shared filesystem across nodes.** The repo *and* the VQA images exist only
+  on faretra; a job scheduled elsewhere can't bind-mount `/workspace` or `/images`
+  (a probe job on `deeplearn2` couldn't even read `/home/cotic`). **Always submit
+  from the repo root and pin the node:**
+  `sbatch -N 1 -w faretra --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh <cfg>`.
+  Running off-faretra needs the repo cloned there (point `GOM_PROJECT_DIR` at it)
+  + `images_base_url` set to faretra's `http.server`.
+- **`scancel` leaks the container.** SLURM kills the batch script but the rootless
+  `docker run` container keeps running (not in the job's cgroup) and holds GPU
+  VRAM — a cancelled run left an orphaned `gom:latest` container pinning ~6 GB on
+  a card. After cancelling, `docker ps` + `docker rm -f <id>` to reclaim it. A
+  *failed* job (python raises) tears its container down on its own; only `scancel`
+  leaks. Check with `squeue -u $USER` (empty = nothing pending/running) and
+  `sacct -u $USER --starttime now-1days` for finished/failed jobs.
+- **The image-mount sanity check is a false alarm, not a broken mount.**
+  `docker run ... gom:latest ls /images | head` prints the CUDA base-image banner
+  first; `head` then closes the pipe and the container dies with
+  `write /dev/stdout: broken pipe`. Pipe *inside* the container instead:
+  `docker run ... gom:latest bash -c 'ls /images | wc -l'` → `1000`. (README_SLURM
+  one-time-setup block updated to match.)
+
+### Plain code bugs fixed
+- `main.py` called `update_cfg_correct()` with no argument (it requires
+  `cfg_updates`) → `TypeError` at startup. Now `update_cfg_correct(None)` (builds
+  the default-config preprocessor).
+- `nx.node_link_data(G)` emitted a `FutureWarning` per graph (NetworkX 3.6 will
+  change the `edges` default). Silenced with the recommended `edges="links"` in
+  `pipeline/preprocessor.py` and `graph/scene_graph.py` — no behaviour change
+  (`"links"` is the current default).
+
+### The preprocessor-vs-VLM VRAM conflict — `release_preprocessor` (main fix)
+
+`vlm_comparison` / `prompting` (and ablations phase 2) run preprocessing and VLM
+inference **in one process**. The GoM preprocessor (YOLO / OWL-ViT / Detectron2 /
+SAM / depth / CLIP) holds **~6 GB** of GPU models, and `main.py` kept it resident
+during the VLM loop even though inference reads preprocessed images from disk
+(`run_vqa(..., skip_preproc=True)`) and never uses it — indeed `main.py` does not
+pass the preprocessor to the inference runners at all. Resident, it left only
+`18.19 / 23.68 GiB` free, so vLLM's default `gpu_memory_utilization=0.9` (which
+demands `0.9 × 23.68 = 21.32 GiB` **free** at startup) failed immediately.
+
+**Fix:** `gom.ablations.utils.release_preprocessor(preproc)` nulls the heavy
+GPU-resident submodules in place (so the memory frees even though `main.py` still
+holds the object), then `gc.collect()` + `torch.cuda.empty_cache()`. `main.py`
+imports it and calls it after each preprocessing phase and before the inference
+runner in all three experiment blocks, re-creating the preprocessor
+(`if preprocessor is None: update_cfg_correct(None)`) before a later experiment's
+preprocessing phase. Net effect: the VLM gets the whole card. (Alternative
+considered and rejected: `skip_preprocessing: true` — valid only when images are
+already cached, and the goal was to run the whole pipeline in-process.)
+
+### vLLM load knobs for a 24GB card — `VllmVLM` new params (`models.py`)
+
+An 8B VLM in bf16 barely fits a 24 GB 3090, and every vLLM default overshoots at
+some stage. `VllmVLM.__init__` now sets these (all overridable):
+
+- **`gpu_memory_utilization` auto (`_auto_gpu_mem_util`, headroom 0.02 / cap 0.96).**
+  vLLM's startup check needs `util × total ≤ free`; auto-sizes to
+  `min(cap, free/total − headroom)`. It is a **narrow** window for an 8B bf16 VLM:
+  at util 0.85 the KV budget is **−2.22 GiB** (`No available memory for the cache
+  blocks`); at 0.94 **+0.22 GiB**; at 0.95 **+0.46 GiB** (works); at 0.96 the
+  startup check fails (`free 22.71 < desired 22.74 GiB`). Viable band ≈ 0.945–0.959;
+  the auto value lands ~0.95.
+- **`enforce_eager=True`** — skips CUDA-graph capture (vLLM otherwise captures ~70
+  batch sizes, each reserving VRAM).
+- **`max_num_batched_tokens=2048`** — bounds the *profiling* activation. vLLM's
+  `profile_run` allocates activation for this many tokens *on top of* the weights,
+  which `gpu_memory_utilization` does **not** cap; at the default 8192 the process
+  peaked at **22.87 GiB** and OOM'd during profiling.
+- **`max_num_seqs=8`** — vLLM warms up the sampler with `max_num_seqs` (default
+  **256**) dummy requests at once, which OOM'd; inference here is `batch_size=1`.
+- **`max_model_len=2048`** — native windows are absurd for VQA (Qwen3-VL = 262144)
+  and set the KV block size + the per-sequence KV minimum. **Known limitation:
+  2048 truncates GoM prompts (below); raising it is gated by the model-dependent
+  KV budget, so it likely needs to become a per-model setting.**
+- **`trust_remote_code=True`** — required to load `OpenGVLab/InternVL3_5-8B`
+  (`InternVLChatModel`); harmless for natively-supported models.
+
+### Model reality on the 3090 (measured)
+
+- **FP8 is dead on Ampere.** The 3090 (sm_86) has no hardware FP8, so vLLM emulates
+  it via Marlin, which needs layer dims divisible by 64 —
+  `RuntimeError: size_n = 4304 is not divisible by tile_n_size = 64` on Qwen3-VL.
+  **All `fp8: true` was removed from `vlm_comparison.yaml`; use bf16 on the 3090.**
+  The Per-model FP8 machinery still works where hardware/dims allow (e.g. the 5090).
+- **`omkarthawakar/LlamaV-o1` (mllama) is not servable** by `vllm==0.11.0` +
+  `transformers==4.57.6`: no native vLLM impl, and the Transformers fallback calls
+  `MllamaProcessor._get_num_multimodal_tokens`, absent in 4.57.6 → `AttributeError`
+  at engine init. (The earlier "LlamaV-o1 loads" note only meant `AutoConfig`
+  resolves it, **not** that vLLM serves it.) **Disabled in the config.**
+- **`google/gemma-3-12b-it` doesn't fit the 3090 in bf16** (~24 GB) and FP8 is
+  unreliable (above). **Disabled on the 3090; run it on the 5090 in bf16.**
+- **The GoM-prompt token wall — the current blocker.** GoM prompts (annotated
+  image + scene-graph text) are large, and *how* large is very model-dependent
+  because the two VLMs' vision tokenizers differ ~4×:
+  - **`Qwen/Qwen3-VL-8B-Instruct`: ~16,000 tokens/prompt**, and it leaves only
+    **0.46 GiB** KV (~1,600 tokens). Irreconcilable — no `max_model_len` both holds
+    the prompt and fits the KV — so **every** request errors (`decoder prompt
+    (length 16081) is longer than the maximum model length`) and it scores 0.00%.
+    Qwen3-VL needs its image visual-token count cut (cap `max_pixels` / downscale)
+    to be usable at all, a GoM-fidelity trade-off.
+  - **`OpenGVLab/InternVL3_5-8B`: ~3,464–4,287 tokens/prompt**, and it leaves
+    **6.19 GiB** KV (22× concurrency at 2048). It **works**: loads, runs, completes
+    (`State COMPLETED`), scores real answers. At `max_model_len=2048` only 6/15
+    examples fit (13.33%); **raising `max_model_len` to ~5120–8192 (well within its
+    6.19 GiB KV) should let all examples run.** InternVL is the practical GoM model
+    on the 3090.
+
+### Current config state & open items
+
+- `slurm_configs/vlm_comparison.yaml` is in a **temporary smoke-test state**:
+  `num_images: 5` (was `-1`), all FP8 removed, and only `OpenGVLab/InternVL3_5-8B`
+  active (LlamaV-o1 / Qwen3-VL / gemma-3-12b commented out). Restore Qwen3-VL and
+  `num_images` for real runs once the token-budget issue is addressed.
+- **Open:** (1) raise `max_model_len` for InternVL and make it **per-model** (Qwen's
+  tiny KV can't afford a large one); (2) decide the image-token cap for Qwen3-VL;
+  (3) confirm the image-vs-text token split of a GoM prompt (trimming verbose
+  scene-graph text is lossless; downscaling the image is not); (4) preprocessing is
+  slow — **~100–135 s/image, ~28–37 h for the full 1000-image set**.
 
 ## Legacy / Reference Files
 

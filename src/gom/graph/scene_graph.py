@@ -386,7 +386,7 @@ class SceneGraphBuilder:
                 return o.tolist()
             raise TypeError(f"Not JSON serializable: {type(o)}")
 
-        data = nx.node_link_data(G)
+        data = nx.node_link_data(G, edges="links")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, default=_np_converter, indent=2)
 

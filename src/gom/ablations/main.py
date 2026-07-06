@@ -6,7 +6,7 @@ import argparse
 from collections import Counter
 
 from .ablate_preprocessing import generate_ablated_dataset, generate_default_dataset
-from .utils import update_cfg_correct
+from .utils import update_cfg_correct, release_preprocessor
 from .run_experiments import run_ablation_experiments, run_vlm_comparison, run_prompting_experiments
 from .logging_utils import (
     setup_logging,
@@ -421,7 +421,7 @@ def main():
         (prompting_enabled and not prompting_skip_preproc)
     )
     if needs_preprocessing:
-        preprocessor = update_cfg_correct()
+        preprocessor = update_cfg_correct(None)
     else:
         preprocessor = None
 
@@ -443,6 +443,8 @@ def main():
             print("═"*50)
             logger.info("Ablations — phase 1: preprocessing started.")
 
+            if preprocessor is None:  # a prior experiment may have released it
+                preprocessor = update_cfg_correct(None)
             for exp_name, exp_data in experiments.items():
                 ablation_grid = exp_data.get("ablation_grid")
                 if not ablation_grid:
@@ -471,6 +473,9 @@ def main():
             print("═"*50)
             logger.info("Ablations — phase 2: VLM inference and evaluation started.")
 
+            # Preprocessing done; free the preprocessor's GPU models before
+            # loading any VLM so it runs on the full card in bf16.
+            preprocessor = release_preprocessor(preprocessor)
             for exp_name, exp_data in experiments.items():
                 ablation_grid = exp_data.get("ablation_grid")
                 if not ablation_grid:
@@ -508,6 +513,8 @@ def main():
 
         if not vlm_comparison_skip_preproc:
             print("\n[VLM Comparison] Generating default preprocessed images...")
+            if preprocessor is None:  # a prior experiment may have released it
+                preprocessor = update_cfg_correct(None)
             preprocessor = apply_experiment_config(preprocessor, "vlm_comparison")
             log_preprocessor_config(preprocessor)
             generate_default_dataset(
@@ -521,6 +528,11 @@ def main():
         else:
             print("\n⏭️  [VLM Comparison Preprocessing SKIP] Preprocessing skipped by configuration.")
             logger.info("VLM comparison — preprocessing SKIPPED by configuration.")
+
+        # Preprocessing (if any) is done and the images are on disk; free the
+        # preprocessor's ~6GB of GPU models so each VLM can use the full card in
+        # bf16. Inference never uses the preprocessor (run_vqa skip_preproc=True).
+        preprocessor = release_preprocessor(preprocessor)
 
         run_vlm_comparison(
             experiment_name="vlm_comparison",
@@ -553,6 +565,8 @@ def main():
 
         if not prompting_skip_preproc:
             print("\n[Prompting] Generating default preprocessed images...")
+            if preprocessor is None:  # a prior experiment may have released it
+                preprocessor = update_cfg_correct(None)
             preprocessor = apply_experiment_config(preprocessor, "prompting")
             log_preprocessor_config(preprocessor)
             generate_default_dataset(
@@ -566,6 +580,10 @@ def main():
         else:
             print("\n⏭️  [Prompting Preprocessing SKIP] Preprocessing skipped by configuration.")
             logger.info("Prompting — preprocessing SKIPPED by configuration.")
+
+        # Preprocessing done; free the preprocessor's GPU models before loading
+        # any VLM so it runs on the full card in bf16.
+        preprocessor = release_preprocessor(preprocessor)
 
         run_prompting_experiments(
             experiment_name="prompting",

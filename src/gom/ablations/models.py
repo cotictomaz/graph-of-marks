@@ -134,6 +134,12 @@ class VllmVLM:
         system_prompt: str = "",
         quantize_fp8: bool = False,
         max_tokens: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        max_model_len: Optional[int] = 2048,
+        max_num_batched_tokens: Optional[int] = 2048,
+        enforce_eager: bool = True,
+        max_num_seqs: Optional[int] = 8,
+        trust_remote_code: bool = True,
     ):
         try:
             from vllm import LLM, SamplingParams
@@ -154,10 +160,105 @@ class VllmVLM:
         if quantize_fp8:
             llm_kwargs["quantization"] = "fp8"
 
-        print(f"[VllmVLM] Loading model: {self.model_name}" + (" (fp8)" if quantize_fp8 else ""))
+        # Some VLMs ship their processor/model as custom code in the HF repo
+        # (e.g. OpenGVLab/InternVL3_5-8B) and vLLM refuses to load them without
+        # this flag ("contains custom code which must be executed..."). Harmless
+        # for models with a native vLLM implementation (e.g. Qwen3-VL).
+        if trust_remote_code:
+            llm_kwargs["trust_remote_code"] = True
+
+        # Cap the context length. These VLMs advertise huge native windows
+        # (e.g. Qwen3-VL = 262144); vLLM sizes KV-cache blocks for that and its
+        # profiling dummy run to match, which OOMs a 24GB card. It also sets the
+        # *minimum* KV the engine must reserve for a single sequence — and an 8B
+        # bf16 VLM already eats ~22GB in weights+activation, leaving almost no KV
+        # room, so a large window makes startup fail with "No available memory for
+        # the cache blocks". A VQA prompt (scene-graph text + one image + a short
+        # answer) is well under 2048 tokens, so 2048 keeps the per-sequence KV
+        # requirement (~0.28GB) inside the sliver of KV an 8B bf16 VLM leaves on a
+        # 24GB card. Pass None to use the model's native maximum.
+        if max_model_len is not None:
+            llm_kwargs["max_model_len"] = max_model_len
+
+        # Bound the startup memory-profiling batch. vLLM's `profile_run` allocates
+        # transient activation for `max_num_batched_tokens` tokens *on top of* the
+        # weights and before the KV cache is sized — `gpu_memory_utilization` does
+        # NOT cap it. At the default 8192 this overshot and OOM'd an 8B model on a
+        # 24GB card; a smaller batch also shrinks the measured activation so more
+        # of the card is left for the KV cache. 2048 still holds one image +
+        # scene-graph prompt (chunked prefill splits anything longer).
+        if max_num_batched_tokens is not None:
+            llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+
+        # Skip CUDA-graph capture. After profiling, vLLM otherwise captures ~70
+        # batch sizes into CUDA graphs, each reserving extra VRAM — enough to tip
+        # a near-full 24GB card into OOM. Eager mode is slightly slower per step
+        # but removes that reservation; negligible for these small VQA runs.
+        if enforce_eager:
+            llm_kwargs["enforce_eager"] = True
+
+        # Cap the max concurrent sequences. vLLM warms up its sampler with
+        # `max_num_seqs` (default 256) dummy requests, allocating logits/sampling
+        # tensors for all of them at once — which OOMs a model that already needs
+        # most of a 24GB card. VQA inference here is batch_size=1, so a small pool
+        # (8) is plenty and keeps the warmup + scheduler memory tiny.
+        if max_num_seqs is not None:
+            llm_kwargs["max_num_seqs"] = max_num_seqs
+
+        # vLLM's startup check requires `gpu_memory_utilization * total` VRAM to
+        # be *free*, and it defaults to 0.9. But in this pipeline the GoM
+        # preprocessor (YOLO/SAM/Detectron2/CLIP, ~6GB) is already resident on
+        # the same card when the VLM loads, so demanding 90% of the card fails
+        # with "Free memory ... less than desired GPU memory utilization" before
+        # the weights are even read. Auto-size the reservation to what is
+        # actually free right now (minus a small headroom), capped at 0.9 so a
+        # clean card behaves exactly as before. Explicit values win.
+        if gpu_memory_utilization is None:
+            gpu_memory_utilization = self._auto_gpu_mem_util()
+        if gpu_memory_utilization is not None:
+            llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+
+        print(
+            f"[VllmVLM] Loading model: {self.model_name}"
+            + (" (fp8)" if quantize_fp8 else "")
+            + (f" (gpu_mem_util={gpu_memory_utilization:.2f})" if gpu_memory_utilization else "")
+        )
         self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(max_tokens=self.max_tokens, temperature=0.0)
         print(f"[VllmVLM] Model loaded: {self.model_name} (max_tokens={self.max_tokens})")
+
+    @staticmethod
+    def _auto_gpu_mem_util(headroom: float = 0.02, cap: float = 0.96) -> Optional[float]:
+        """Fraction of the card vLLM may reserve, sized to what is free *now*.
+
+        Returns ``min(cap, free/total - headroom)`` from the current CUDA device,
+        so the reservation fits alongside anything already resident (e.g. the GoM
+        preprocessor, if it hasn't been released yet). Falls back to ``None``
+        (vLLM's own 0.9 default) if the free VRAM can't be read.
+
+        The cap is high (0.95) because an 8B bf16 VLM already needs ~22GB of
+        weights + activation on a 24GB card, so the KV cache only gets whatever is
+        left of `gpu_memory_utilization * total` — too low a value yields negative
+        KV and a "No available memory for the cache blocks" failure. The transient
+        profiling-activation OOM that a high value used to cause is now handled
+        separately by `enforce_eager` + a small `max_num_batched_tokens` (which cut
+        the activation peak), so it is safe to reserve most of the card here. The
+        `free/total - headroom` term still steps the value down automatically if
+        the card isn't fully free when the engine loads.
+        """
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return None
+            free_b, total_b = torch.cuda.mem_get_info()
+            if not total_b:
+                return None
+            util = (free_b / total_b) - headroom
+            # Clamp: never above `cap` (clean-card behaviour) nor below a floor
+            # that couldn't host any model (surfaces a real OOM instead).
+            return round(max(0.30, min(cap, util)), 2)
+        except Exception:
+            return None
 
     def generate(self, prompt: str, image_path: str) -> str:
         if not os.path.exists(image_path):

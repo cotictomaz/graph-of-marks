@@ -10,7 +10,7 @@
 base_dir: "/workspace/ablation_studies/prompting"
 backend: "vllm"
 n_runs: 3
-num_images: -1        # how many unique images to keep; -1 = all images
+num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 force_reprocess: false
 
@@ -27,7 +27,7 @@ dataset_path: "/workspace/vqav1_limited_1000.json"
 #     images_base_url to node 40's HTTP image server; each image is fetched once
 #     into image_cache_dir and reused thereafter.
 images_dir: "/images"          # node-40 mount target (run_docker.sh -v "$GOM_IMAGES_DIR":/images:ro)
-images_base_url: ""            # e.g. "http://137.204.107.40:8000" when running off node 40
+images_base_url: "http://137.204.107.40:8000"   # off-faretra nodes fetch images over HTTP from node 40 (needs its http.server up)
 image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (must be under /workspace)
 
 ablations:
@@ -45,10 +45,13 @@ prompting:
 
   # An entry may be a plain string (bf16) or a mapping with `fp8: true` to
   # FP8-quantize on load (see gom.ablations.models.parse_model_entry).
-  models:
-    - "Qwen/Qwen3-VL-8B-Instruct"        # reasoning OFF — instruct baseline
-    - "Qwen/Qwen3-VL-8B-Thinking"        # reasoning ON, same weights → isolates CoT/graph_guided × reasoning
-    - "omkarthawakar/LlamaV-o1"          # 2nd, independent reasoning model (CoT effect isn't Qwen-specific)
+  # PREPROCESSING-ONLY (2026-07-06): models emptied to disable VLM inference —
+  # this run just builds & caches the preprocessed images. Restore the models
+  # below for the real run:
+  #   - "Qwen/Qwen3-VL-8B-Instruct"      # reasoning OFF — instruct baseline
+  #   - "Qwen/Qwen3-VL-8B-Thinking"      # reasoning ON, same weights → isolates CoT/graph_guided × reasoning
+  #   - "omkarthawakar/LlamaV-o1"        # 2nd, independent reasoning model (CoT effect isn't Qwen-specific)
+  models: []
 
   # Optional preprocessing parameter overrides applied on top of the pipeline defaults.
   preprocessing_overrides: {}

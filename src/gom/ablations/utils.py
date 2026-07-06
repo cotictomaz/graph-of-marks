@@ -39,6 +39,66 @@ def update_cfg_correct(cfg_updates: Dict[str, Any] | None, preproc_obj: Optional
 
     return Preprocessor(cfg)
 
+
+def release_preprocessor(preproc: Optional[Preprocessor]) -> None:
+    """Free the GoM preprocessor's GPU memory before VLM inference.
+
+    The preprocessor (detectors / SAM / depth / CLIP, ~6GB on a 24GB card) is
+    only needed while *generating* the preprocessed images. Inference then reads
+    those images from disk (``run_vqa(..., skip_preproc=True)``) and never
+    touches the preprocessor — indeed ``main.py`` does not even pass it to the
+    inference runners. Left resident, however, it steals ~6GB from the VLM: on a
+    24GB 3090 that forces FP8 (unreliable on Ampere/Marlin) or an OOM at
+    vLLM startup. Releasing it here lets each VLM use the full card in bf16.
+
+    Nulls the heavy GPU-resident submodules *in place* so their tensors are
+    dropped even though the caller still holds the object, then forces a GC +
+    CUDA cache flush. Best-effort and exception-safe. Always returns ``None`` so
+    callers can write ``preprocessor = release_preprocessor(preprocessor)``.
+    A fresh preprocessor can be rebuilt later with ``update_cfg_correct(None)``
+    if another experiment's preprocessing phase needs one.
+    """
+    if preproc is None:
+        return None
+
+    import gc
+
+    # Detectors are a list of models; give each its own clear() hook a chance,
+    # then drop the list.
+    try:
+        for det in getattr(preproc, "detectors", None) or []:
+            if hasattr(det, "clear"):
+                try:
+                    det.clear()
+                except Exception:
+                    pass
+        preproc.detectors = []
+    except Exception:
+        pass
+
+    # Drop references to every other GPU-resident submodule so nothing keeps
+    # their weights alive. gc.collect() below reclaims any reference cycles
+    # (e.g. relations_inferencer -> clip).
+    for attr in (
+        "detector_manager", "segmenter", "depth_est", "clip",
+        "relations_inferencer", "visualizer",
+    ):
+        try:
+            if hasattr(preproc, attr):
+                setattr(preproc, attr, None)
+        except Exception:
+            pass
+
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return None
+
+
 # -----------------------------
 # Path helpers (consistent naming and deterministic caching)
 # -----------------------------

@@ -9,7 +9,7 @@
 base_dir: "/workspace/ablation_studies/vlm_comparison"
 backend: "vllm"
 n_runs: 3
-num_images: -1        # how many unique images to keep; -1 = all images
+num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 force_reprocess: false
 
@@ -26,7 +26,7 @@ dataset_path: "/workspace/vqav1_limited_1000.json"
 #     images_base_url to node 40's HTTP image server; each image is fetched once
 #     into image_cache_dir and reused thereafter.
 images_dir: "/images"          # node-40 mount target (run_docker.sh -v "$GOM_IMAGES_DIR":/images:ro)
-images_base_url: ""            # e.g. "http://137.204.107.40:8000" when running off node 40
+images_base_url: "http://137.204.107.40:8000"   # off-faretra nodes fetch images over HTTP from node 40 (needs its http.server up)
 image_cache_dir: ""           # empty ⇒ defaults to {base_dir}/image_cache (must be under /workspace)
 
 ablations:
@@ -42,14 +42,20 @@ vlm_comparison:
   # Add/remove Hugging Face repo IDs here to change which models are compared.
   # An entry may be a plain string (loaded in bf16) or a mapping with `fp8: true`
   # to FP8-quantize that model on load (see gom.ablations.models.parse_model_entry).
-  models:
-    - "omkarthawakar/LlamaV-o1"          # retained paper anchor (reasoning model; best in their Table 2)
-    - "Qwen/Qwen3-VL-8B-Instruct"        # successor to the paper's Qwen2.5-VL-7B (newest generation); bf16-safe on 24GB
-    - "OpenGVLab/InternVL3_5-8B"         # strong, distinct architecture lineage (ViT–MLP–LLM); bf16-safe on 24GB
-    - name: "google/gemma-3-12b-it"      # successor slot to the paper's Gemma-3-4B; ~size peer of LlamaV-o1
-      fp8: true                          # ~24GB in bf16 → FP8 (~13GB) so it fits a 24GB card (drop for the 5090)
-                                         # NB: gated repo → needs HF_TOKEN (see README_SLURM). gemma-4/gemma4_unified
-                                         # is unsupported by transformers 4.57.6 / vllm 0.11.0; gemma-3 is the newest supported Gemma.
+  # These load in plain bf16: main.py now releases the GoM preprocessor's GPU
+  # memory after preprocessing (before the VLM loop), so each model gets the full
+  # 24GB card. FP8 is intentionally avoided on the RTX 3090 — Ampere has no
+  # hardware FP8, so vLLM emulates it via Marlin, which needs layer dims divisible
+  # by 64 and fails on these architectures (e.g. Qwen3-VL's 4304).
+  # PREPROCESSING-ONLY (2026-07-06): models emptied to disable VLM inference — this
+  # run just builds & caches the preprocessed images. Restore for real runs (bf16;
+  # see CLAUDE.md "Ablations end-to-end on faretra" for per-model status on the 3090):
+  #   - "omkarthawakar/LlamaV-o1"        # DISABLED: mllama not servable by vllm 0.11.0 + transformers 4.57.6
+  #   - "Qwen/Qwen3-VL-8B-Instruct"      # ~16k-token GoM prompts exceed its KV budget on a 3090
+  #   - "OpenGVLab/InternVL3_5-8B"       # the model that actually runs on the 3090 (~4k-token prompts, 6.19GB KV)
+  #   - name: "google/gemma-3-12b-it"    # DISABLED on 3090: too big in bf16, FP8 dead on Ampere
+  #     fp8: true
+  models: []
 
   # Optional preprocessing parameter overrides applied on top of the pipeline
   # defaults (any field of gom.config.PreprocessorConfig). Leave empty ({})

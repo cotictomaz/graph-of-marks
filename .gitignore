@@ -52,6 +52,8 @@ demo_output/
 external_libs/
 tests/
 scripts_test/
+ablation_studies/
+slurm-**
 
 .coverage
 # Hugging Face access token (never commit secrets)

@@ -4573,7 +4573,7 @@ class ImageGraphPreprocessor:
                     if isinstance(o, _np.generic):
                         return o.item()
                     raise TypeError
-                json.dump(nx.node_link_data(G), jf, default=_np_conv, indent=2)
+                json.dump(nx.node_link_data(G, edges="links"), jf, default=_np_conv, indent=2)
         except Exception as e:
             logging.getLogger(__name__).warning(f"[WARN] Could not save scene graph json: {e}")
 
