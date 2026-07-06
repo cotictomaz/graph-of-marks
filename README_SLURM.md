@@ -166,8 +166,14 @@ doesn't exist). Precedence: `GOM_IMAGES_DIR` env var → `~/.gom_images_dir` →
 ```bash
 # on node 40 (faretra) — set once, survives logout, never committed
 echo /datasets/VisualQA_Datasets/Preprocessing/VQAV1/original_VQAV1/vqav1_images > ~/.gom_images_dir
-# sanity check: the mount should list the COCO_train2014_*.jpg files
-docker run --rm -v "$(cat ~/.gom_images_dir)":/images:ro gom:latest ls /images | head
+# sanity check: the mount should list the COCO_train2014_*.jpg files.
+# NB: pipe INSIDE the container (bash -c '... | head'), and expect the
+# CUDA base-image banner to print first. Piping the container's stdout
+# straight into `head` on the host truncates after the banner and kills
+# the container with "write /dev/stdout: broken pipe" — that is the shell
+# closing the pipe, NOT a broken mount.
+docker run --rm -v "$(cat ~/.gom_images_dir)":/images:ro gom:latest bash -c 'ls /images | head'
+docker run --rm -v "$(cat ~/.gom_images_dir)":/images:ro gom:latest bash -c 'ls /images | wc -l'  # -> 1000
 ```
 
 **One-time setup on node 40 — (b) start the image server** for the *other*
