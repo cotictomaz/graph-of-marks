@@ -10,23 +10,61 @@ from ..config import default_config
 from ..pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
 from ..vqa.io import load_image
 
+# Keys that ``preprocess_for_qa`` re-sets on *every* (image, question) call as
+# per-image plumbing rather than as ablation configuration. They change (or are
+# re-applied) constantly, so logging them would reproduce the spam we are trying
+# to remove — never emit config-debug lines for them.
+_PLUMBING_KEYS = frozenset({
+    "input_path", "output_folder", "question", "min_relations_per_object",
+})
+
+# Last value we actually logged for each config key. Lets us print a line only
+# the *first* time a key is applied and thereafter only when its value *changes*
+# (e.g. when an ablation grid point advances). Persists for the whole process,
+# spanning every grid point / experiment in a single run.
+_logged_cfg_values: Dict[str, Any] = {}
+
+
+def _log_cfg_apply(key: str, old_val: Any, new_val: Any, propagated: List[str]) -> None:
+    """Emit a ``[DEBUG]`` line for a config key only when it is worth seeing:
+    the first time the key is set, or when its value changes from what we last
+    logged. Per-image plumbing keys (``_PLUMBING_KEYS``) are never logged. This
+    is what turns the former once-per-image spam into once-per-ablation-change.
+    """
+    if key in _PLUMBING_KEYS:
+        return
+
+    first_time = key not in _logged_cfg_values
+    changed = (not first_time) and _logged_cfg_values[key] != new_val
+    if first_time or changed:
+        where = f"  (also → {', '.join(propagated)})" if propagated else ""
+        if first_time:
+            print(f"[DEBUG] cfg.{key} = {new_val}{where}")
+        else:
+            print(f"[DEBUG] cfg.{key}: {_logged_cfg_values[key]} → {new_val}{where}")
+    _logged_cfg_values[key] = new_val
+
+
 def update_cfg_correct(cfg_updates: Dict[str, Any] | None, preproc_obj: Optional[ImageGraphPreprocessor] = None) -> ImageGraphPreprocessor:
 
     if preproc_obj is not None:
         if cfg_updates:
             for k, v in cfg_updates.items():
-                if hasattr(preproc_obj.cfg, k):
-                    old_val = getattr(preproc_obj.cfg, k)
-                    setattr(preproc_obj.cfg, k, v)
-                    print(f"[DEBUG] Updated cfg.{k}: {old_val} → {v}")
-                    if hasattr(preproc_obj.visualizer.cfg, k):
-                        old_val = getattr(preproc_obj.visualizer.cfg, k)
-                        setattr(preproc_obj.visualizer.cfg, k, v)
-                        print(f"[DEBUG] Updated in the visualizer cfg.{k}: {old_val} → {v}")
-                    if hasattr(preproc_obj.relations_inferencer.config, k):
-                        old_val = getattr(preproc_obj.relations_inferencer.config, k)
-                        setattr(preproc_obj.relations_inferencer.config, k, v)
-                        print(f"[DEBUG] Updated in the relations inferencer cfg.{k}: {old_val} → {v}")
+                if not hasattr(preproc_obj.cfg, k):
+                    continue
+                old_val = getattr(preproc_obj.cfg, k)
+                setattr(preproc_obj.cfg, k, v)
+                # Propagate to sub-objects that keep their own config copy. This
+                # is functional and must happen on every call, independently of
+                # whether we log the change below.
+                propagated: List[str] = []
+                if hasattr(preproc_obj.visualizer.cfg, k):
+                    setattr(preproc_obj.visualizer.cfg, k, v)
+                    propagated.append("visualizer")
+                if hasattr(preproc_obj.relations_inferencer.config, k):
+                    setattr(preproc_obj.relations_inferencer.config, k, v)
+                    propagated.append("relations_inferencer")
+                _log_cfg_apply(k, old_val, v, propagated)
         return preproc_obj
 
     cfg = default_config()
@@ -35,7 +73,7 @@ def update_cfg_correct(cfg_updates: Dict[str, Any] | None, preproc_obj: Optional
             if hasattr(cfg, k):
                 old_val = getattr(cfg, k)
                 setattr(cfg, k, v)
-                print(f"[DEBUG] Updated cfg.{k}: {old_val} → {v}")
+                _log_cfg_apply(k, old_val, v, [])
 
     return Preprocessor(cfg)
 

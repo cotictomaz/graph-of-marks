@@ -34,7 +34,7 @@ import os
 import shutil
 from typing import List, Dict, Any, Optional
 
-from .utils import run_preprocessing
+from .utils import run_preprocessing, get_preprocessed_path
 from .logging_utils import get_logger
 
 
@@ -44,6 +44,26 @@ def _count_unique_images(examples: List[Any]) -> int:
         return len({ex.image_path for ex in examples})
     except Exception:
         return len(examples)
+
+
+def _completion_status(examples: List[Any], out_dir: str) -> tuple[int, int]:
+    """Report how many of ``examples`` are already preprocessed in ``out_dir``.
+
+    Completeness is measured per (image, question) pair against the *same*
+    canonical output path the pipeline writes and later reuses
+    (``preprocess_for_qa`` -> ``get_preprocessed_path`` -> ``{base}_{qhash}_output.jpg``),
+    so the count is consistent with the per-pair fast-path that actually skips
+    already-done work during ``run_preprocessing``.
+
+    Returns:
+        (n_done, n_missing) over the given examples.
+    """
+    done = 0
+    for ex in examples:
+        expected = get_preprocessed_path(ex.image_path, ex.question, out_dir)
+        if os.path.exists(expected):
+            done += 1
+    return done, len(examples) - done
 
 
 def generate_default_dataset(
@@ -79,22 +99,32 @@ def generate_default_dataset(
         preprocessing_overrides or {},
     )
 
-    if os.path.exists(out_dir):
-        if force_reprocess:
-            print(f"\n  [♻️ FORCE REPROCESS] Clearing existing folder and recomputing: {out_dir}")
-            logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, out_dir)
-            shutil.rmtree(out_dir)
-            os.makedirs(out_dir)
-        else:
-            if len(os.listdir(out_dir)) > 0:
-                print(f"\n  [⏭️ SKIP] Default dataset already present in {out_dir}. Skipping.")
-                logger.info("[preprocessing:%s] SKIP — dataset already present in %s", experiment_name, out_dir)
-                return
-            else:
-                print(f"\n  [▶️ RESUME] Empty folder found at {out_dir}. Starting processing.")
-                logger.info("[preprocessing:%s] RESUME — empty folder at %s", experiment_name, out_dir)
-    else:
+    os.makedirs(out_dir, exist_ok=True)
+
+    if force_reprocess and os.listdir(out_dir):
+        print(f"\n  [♻️ FORCE REPROCESS] Clearing existing folder and recomputing: {out_dir}")
+        logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, out_dir)
+        shutil.rmtree(out_dir)
         os.makedirs(out_dir)
+
+    if not force_reprocess:
+        # Decide per (image, question) pair rather than "is the folder non-empty":
+        # a run interrupted mid-way leaves a partially-filled folder, and the old
+        # "non-empty → skip everything" logic then skipped the 265 unprocessed
+        # pairs forever. Skip only when *all* expected outputs exist; otherwise
+        # fall through and let run_preprocessing's per-pair fast-path
+        # (preprocess_for_qa) reprocess just the missing ones.
+        n_done, n_missing = _completion_status(examples, out_dir)
+        if n_missing == 0 and n_done > 0:
+            print(f"\n  [⏭️ SKIP] Default dataset complete in {out_dir} ({n_done}/{len(examples)}). Skipping.")
+            logger.info("[preprocessing:%s] SKIP — complete (%d/%d) in %s",
+                        experiment_name, n_done, len(examples), out_dir)
+            return
+        if n_done > 0:
+            print(f"\n  [▶️ RESUME] Partial dataset in {out_dir}: {n_done}/{len(examples)} done, "
+                  f"{n_missing} remaining. Processing only the missing ones.")
+            logger.info("[preprocessing:%s] RESUME — %d/%d done, %d remaining in %s",
+                        experiment_name, n_done, len(examples), n_missing, out_dir)
 
     print(f"\n  ↳ 🔧 Processing with default config (overrides: {preprocessing_overrides or {}})")
     print(f"  ↳ 💾 Saving to: {out_dir}")
@@ -171,24 +201,30 @@ def generate_ablated_dataset(
 
         logger.info("[preprocessing:%s] grid point %s → %s", experiment_name, current_overrides, folder_suffix)
 
-        if os.path.exists(out_dir):
-            if force_reprocess:
-                print(f"\n  [♻️ FORCE REPROCESS] Cancello la cartella esistente e ricalcolo: {folder_suffix}")
-                logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, folder_suffix)
-                shutil.rmtree(out_dir)
-                os.makedirs(out_dir)
-            else:
-                # Controlliamo se la cartella ha già dei file dentro.
-                # Se è vuota (magari creata per errore e script interrotto), procediamo.
-                if len(os.listdir(out_dir)) > 0:
-                    print(f"\n  [⏭️ SKIP] Dataset già presente in {folder_suffix}. Passo al prossimo parametro.")
-                    logger.info("[preprocessing:%s] SKIP — already present: %s", experiment_name, folder_suffix)
-                    continue
-                else:
-                    print(f"\n  [▶️ RESUME] Cartella vuota trovata per {folder_suffix}. Inizio processamento.")
-                    logger.info("[preprocessing:%s] RESUME — empty folder: %s", experiment_name, folder_suffix)
-        else:
+        os.makedirs(out_dir, exist_ok=True)
+
+        if force_reprocess and os.listdir(out_dir):
+            print(f"\n  [♻️ FORCE REPROCESS] Cancello la cartella esistente e ricalcolo: {folder_suffix}")
+            logger.info("[preprocessing:%s] FORCE REPROCESS — clearing %s", experiment_name, folder_suffix)
+            shutil.rmtree(out_dir)
             os.makedirs(out_dir)
+
+        if not force_reprocess:
+            # Skip this grid point only when *every* expected output is present.
+            # A partially-processed folder (interrupted run) must resume the
+            # missing pairs, not be skipped wholesale — run_preprocessing's
+            # per-pair fast-path reprocesses just what is missing.
+            n_done, n_missing = _completion_status(examples, out_dir)
+            if n_missing == 0 and n_done > 0:
+                print(f"\n  [⏭️ SKIP] Dataset completo in {folder_suffix} ({n_done}/{len(examples)}). Passo al prossimo parametro.")
+                logger.info("[preprocessing:%s] SKIP — complete (%d/%d): %s",
+                            experiment_name, n_done, len(examples), folder_suffix)
+                continue
+            if n_done > 0:
+                print(f"\n  [▶️ RESUME] Dataset parziale in {folder_suffix}: {n_done}/{len(examples)} fatti, "
+                      f"{n_missing} rimanenti. Processo solo i mancanti.")
+                logger.info("[preprocessing:%s] RESUME — %d/%d done, %d remaining: %s",
+                            experiment_name, n_done, len(examples), n_missing, folder_suffix)
 
         print(f"\n  ↳ 🔧 Processamento configurazione: {current_overrides}")
         print(f"  ↳ 💾 Salvataggio in: {out_dir}")
