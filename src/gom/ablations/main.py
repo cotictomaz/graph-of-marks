@@ -274,6 +274,15 @@ def apply_experiment_config(preproc_obj, exp_name: str):
         }
 
     final_updates = {**base_cfg_updates, **config_changes}
+
+    # Grid ablations preprocess WITHOUT question-guided filtering so the swept
+    # hyperparameter is the only thing varying across grid points (question
+    # filtering would otherwise change which objects/relations survive per
+    # image and confound the ablation). vlm_comparison / prompting are the only
+    # callers that pass these literal names, and they keep filtering on.
+    if exp_name not in ("vlm_comparison", "prompting"):
+        final_updates["apply_question_filter"] = False
+
     return update_cfg_correct(final_updates, preproc_obj)
 
 def main():
