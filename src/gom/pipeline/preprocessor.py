@@ -289,7 +289,9 @@ License: See repository LICENSE file
 from __future__ import annotations
 
 import contextlib
+import copy
 import gc
+import hashlib
 import json
 import logging
 import math
@@ -350,7 +352,7 @@ from gom.segmentation.sam1 import Sam1Segmenter
 from gom.segmentation.sam2 import Sam2Segmenter
 from gom.segmentation.samhq import SamHQSegmenter
 from gom.utils.boxes import iou
-from gom.utils.cache_advanced import ImageDetectionCache
+from gom.utils.cache_advanced import ImageDetectionCache, LRUCache
 from gom.utils.clip_utils import CLIPWrapper
 from gom.utils.colors import base_label, canonical_label
 
@@ -586,6 +588,24 @@ class PreprocessorConfig:
     # Detection caching (performance optimization)
     enable_detection_cache: bool = True  # Cache detection results
     max_cache_size: int = 100  # Maximum cached images
+
+    # Segmentation (SAM) caching (performance optimization). Masks are a pure
+    # function of (image, boxes) and are invariant across ablation grid points
+    # (which only change downstream relation-cap / visualization params), so
+    # reusing them avoids re-running SAM for every grid point on the same image.
+    #
+    # CAPACITY: ablations loop grid-outer / pairs-inner, so a pair is only
+    # re-visited a full dataset-pass later. To get any cross-grid reuse the
+    # cache must hold the entire working set — one entry per distinct
+    # (image, boxes) pair, i.e. up to num_images × questions_per_image. Hence a
+    # dedicated large item cap (NOT max_cache_size, which is the detection
+    # cache's 100 unique-image budget). Both limits are lazy ceilings: memory is
+    # allocated only as masks are actually cached, so a generous cap is free for
+    # small runs and merely degrades to partial reuse when a huge dataset
+    # exceeds the RAM ceiling.
+    enable_segmentation_cache: bool = True  # Cache SAM masks keyed on (image, boxes)
+    segmentation_cache_max_items: int = 8192  # Max distinct (image, boxes) entries
+    segmentation_cache_max_size_mb: float = 8192.0  # Host-RAM ceiling for cached masks
 
     # Detection image resizing (for faster inference)
     detection_resize: bool = True  # Resize images before detection
@@ -829,6 +849,18 @@ class ImageGraphPreprocessor:
         else:
             self._detection_cache = None
 
+        # LRU segmentation-mask cache (host RAM, memory-aware eviction). Masks
+        # are a pure function of (image, boxes); ablation grid points that only
+        # vary downstream relation-cap / visualization params reuse them instead
+        # of re-running SAM. Correct-by-construction: the key is the input.
+        if getattr(self.cfg, "enable_segmentation_cache", True):
+            self._segmentation_cache = LRUCache(
+                max_items=getattr(self.cfg, "segmentation_cache_max_items", 8192),
+                max_size_mb=getattr(self.cfg, "segmentation_cache_max_size_mb", 8192.0),
+            )
+        else:
+            self._segmentation_cache = None
+
         # Support for custom user-defined functions
         # These can be set by the high-level API (GraphOfMarks)
         self._custom_detector = None
@@ -841,6 +873,10 @@ class ImageGraphPreprocessor:
         # Clear detection cache
         if hasattr(self, '_detection_cache') and self._detection_cache is not None:
             self._detection_cache.clear()
+
+        # Clear segmentation-mask cache
+        if hasattr(self, '_segmentation_cache') and self._segmentation_cache is not None:
+            self._segmentation_cache.clear()
 
         # Clear detector models
         if hasattr(self, 'detectors'):
@@ -1155,6 +1191,64 @@ class ImageGraphPreprocessor:
         if not self.cfg.enable_detection_cache:
             return
         self._detection_cache.put(key, value)
+
+    def _generate_segmentation_cache_key(self, image_pil: Image.Image, boxes: List[Any]) -> str:
+        """
+        Deterministic cache key for a SAM segmentation call.
+
+        SAM masks are a pure function of ``(image, boxes)`` given a fixed
+        segmenter, so the key hashes exactly those inputs:
+          - image content (first 1MB of bytes, matching the detection cache),
+          - the segmenter class name (guards against a segmenter swap),
+          - image size and the boxes **in order** (masks[i] corresponds to
+            boxes[i], so order is significant and must not be sorted),
+            rounded to 2 decimals to absorb float noise.
+
+        Identical inputs across ablation grid points / re-runs produce the same
+        key and hit; any difference changes the key and correctly recomputes.
+        """
+        img_bytes = image_pil.tobytes()[:1024 * 1024]
+        img_hash = hashlib.md5(img_bytes).hexdigest()[:16]
+        seg_name = type(self.segmenter).__name__ if self.segmenter is not None else "none"
+        rounded_boxes = [[round(float(c), 2) for c in box] for box in boxes]
+        payload = json.dumps(
+            {"seg": seg_name, "size": list(image_pil.size), "boxes": rounded_boxes},
+            sort_keys=True,
+        )
+        payload_hash = hashlib.md5(payload.encode()).hexdigest()[:12]
+        return f"seg_{img_hash}_{payload_hash}"
+
+    def _segment_cached(self, image_pil: Image.Image, boxes: List[Any]) -> List[Dict[str, Any]]:
+        """
+        Run ``self.segmenter.segment(image_pil, boxes)`` with an (image, boxes)
+        cache in front of it.
+
+        Deep-copy discipline is mandatory for correctness: the caller mutates
+        the returned masks in place (Detectron2 mask fusion, quality filtering),
+        so the cache must never hand out a shared object.
+          - On miss: compute masks, store a pristine ``deepcopy`` snapshot, and
+            return the freshly computed (mutable) object to the caller.
+          - On hit: return a ``deepcopy`` of the cached snapshot.
+
+        Falls back to a direct, uncached call when the cache is disabled or the
+        boxes list is empty (nothing to key on / segment).
+        """
+        if self._segmentation_cache is None or not boxes:
+            return self.segmenter.segment(image_pil, boxes)
+
+        key = self._generate_segmentation_cache_key(image_pil, boxes)
+        cached = self._segmentation_cache.get(key)
+        if cached is not None:
+            self.logger.info("   Using cached segmentation masks")
+            return copy.deepcopy(cached)
+
+        masks = self.segmenter.segment(image_pil, boxes)
+        try:
+            self._segmentation_cache.put(key, copy.deepcopy(masks))
+        except Exception:
+            # Caching is best-effort; a failure to store must never abort a run.
+            pass
+        return masks
 
     # ----------------------------- Detection Execution -----------------------------
 
@@ -3695,9 +3789,9 @@ class ImageGraphPreprocessor:
                     masks = custom_out
                 else:
                     self.logger.warning("Custom segmenter returned unknown format, falling back to default.")
-                    masks = self.segmenter.segment(image_pil, boxes)
+                    masks = self._segment_cached(image_pil, boxes)
             else:
-                masks = self.segmenter.segment(image_pil, boxes)
+                masks = self._segment_cached(image_pil, boxes)
             # fuse with detectron2 masks if available
             for i in range(len(masks)):
                 d2m = det2_for_mask[i].get("det2_mask") if det2_for_mask and det2_for_mask[i] is not None else None

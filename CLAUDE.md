@@ -610,6 +610,86 @@ some stage. `VllmVLM.__init__` now sets these (all overridable):
   scene-graph text is lossless; downscaling the image is not); (4) preprocessing is
   slow — **~100–135 s/image, ~28–37 h for the full 1000-image set**.
 
+## Preprocessing speed: cross-grid caching of the heavy stages (2026-07-07)
+
+**The ablation grids re-run the *entire* GoM pipeline for every grid point, even
+though the grid parameters only touch downstream stages.** `ablate_edge_thickness`
+(`rel_arrow_linewidth`) and `ablate_edge_color` (`edge_color`) are pure
+*visualization* params; `ablate_max_relations*` only change a *post-scoring*
+relation cap (`limit_relationships_per_object`). None of them affect detection,
+segmentation, depth, or relation *scoring* — yet `ablate_preprocessing.py` loops
+**grid-outer / pairs-inner** (`for values_tuple in zip(*value_lists): run_preprocessing(all_examples)`,
+`ablate_preprocessing.py:191`), so the same expensive upstream work is recomputed
+once per grid point. With ~20 grid points that is a ~20× multiplier of redundant
+detection+SAM+depth+CLIP compute. HTTP image fetch is **not** the bottleneck —
+`build_vqa_examples` resolves/downloads every image eagerly and memoized *before*
+Fase 1, so the timed loop only reads the local cache; the per-pair variance
+(9–120 s) tracks scene complexity (object count → per-object SAM + O(n²) CLIP
+relation scoring), i.e. GPU compute.
+
+**What was already cached (before this work):** detection (`ImageDetectionCache`,
+in-memory, keyed on image+detectors+thresholds, question-independent → reused
+across grid points) and depth (`DepthEstimatorV2._depth_cache`, per image hash).
+**What was NOT:** segmentation (SAM) and relation inference (the two dominant
+costs).
+
+### Segmentation (SAM) mask cache — implemented (`pipeline/preprocessor.py`)
+
+Fronts the single SAM call site (`self.segmenter.segment(image_pil, boxes)`) with
+an in-memory LRU cache. **Correct-by-construction: the key is a hash of the call's
+actual arguments** — `hash(image bytes[:1MB]) + hash(segmenter class name, image
+size, boxes *in order* rounded to 2dp)` — so a hit can only ever return masks
+computed for an identical `(image, boxes)`; any difference (different image,
+boxes, or box order) changes the key and recomputes. Masks are a pure function of
+`(image, boxes)`, and boxes are invariant across all grid points/experiments
+(they depend only on detection + question filter + NMS, never on relation/viz grid
+params), so grid points 2..N of every experiment reuse the first pass's masks.
+
+- **Safe for all three experiment types** (`ablations` / `vlm_comparison` /
+  `prompting`) because they all preprocess through the same `process_single_image`
+  → same `segment()` choke point, and the key encodes nothing experiment-specific.
+  `vlm_comparison`/`prompting` preprocess each pair once so they rarely hit, but
+  the cache can never be *wrong* for them.
+- **The mutation trap (why deep-copy is mandatory):** the caller mutates the
+  returned masks *in place* immediately after `segment()` — Detectron2 mask fusion
+  (`preprocessor.py:3705`) and `_filter_low_quality_masks`. So `_segment_cached`
+  **deep-copies on store and on return**: on miss it stores `copy.deepcopy(masks)`
+  (a pristine pre-mutation snapshot) and returns the original; on hit it returns
+  `copy.deepcopy(cached)`. Deep-copying a few numpy masks is ~ms vs. hundreds of ms
+  for a SAM pass. Skipping this would corrupt the cache on the second hit.
+- **Capacity is the make-or-break knob.** Because the loop is grid-outer, a pair
+  is only re-visited a *full dataset-pass* later, so the cache must hold the **entire
+  working set** or it evicts before reuse. The segmentation key is
+  question-dependent → up to **num_images × questions_per_image** distinct entries
+  (≈300 for the 100-image config), which is why it uses a **dedicated**
+  `segmentation_cache_max_items` (default **8192**), **not** the detection cache's
+  `max_cache_size=100` (that 100 is right for detection's question-independent,
+  one-per-image key, but would thrash segmentation to ~zero hits). Both
+  `segmentation_cache_max_items` and `segmentation_cache_max_size_mb` (default
+  **8192 MB**) are **lazy ceilings** — host RAM is allocated only as masks are
+  actually cached, so a generous cap is free for small runs. A full
+  `num_images:-1` run (~3000 pairs, ~9 GB of masks) exceeds the 8 GB ceiling →
+  raise `segmentation_cache_max_size_mb` or accept graceful partial reuse.
+- **Config flags** (`PreprocessorConfig`): `enable_segmentation_cache=True`,
+  `segmentation_cache_max_items=8192`, `segmentation_cache_max_size_mb=8192.0`.
+  Setting `enable_segmentation_cache=False` reproduces the old behaviour exactly.
+- **Scope of the win:** this removes SAM from ~95% of pairs (all but the first
+  pass), but **relation inference still recomputes every grid point** — so the
+  wall-clock gain is "minus the SAM share," not 20× overall. The dominant win
+  needs the relations/CLIP cache below.
+- **Note (memory hygiene):** `release_preprocessor` (ablations/utils.py) nulls GPU
+  submodules before VLM inference but does **not** clear `_segmentation_cache`
+  (host RAM, harmless to VRAM); the cache is freed on the preprocessor's `__del__`
+  or when it is rebuilt. Clearing it in `release_preprocessor` is a possible tidy-up.
+
+### Relations / CLIP inference cache — PLANNED (next step, not yet implemented)
+
+The bigger win: `relations_inferencer.infer(...)` (`preprocessor.py:3854`, the
+O(n²) CLIP pair scoring) is the top per-pair cost and is recomputed every grid
+point. See the plan being drafted for this — same correct-by-construction,
+deep-copy-safe approach, keyed on `infer()`'s actual inputs including a
+`relations_config` signature so grids that *do* feed `infer()` correctly miss.
+
 ## Legacy / Reference Files
 
 - `src/all_in_one_gom.py` — monolithic prototype; not part of the packaged API
