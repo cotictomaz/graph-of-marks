@@ -56,11 +56,19 @@ def run_ablation_experiments(
 
     # 1. CICLO ESTERNO: I MODELLI (Ottimizza il caricamento in VRAM)
     for model_entry in models_list:
-        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        spec = parse_model_entry(model_entry)
+        model_name, quantize_fp8 = spec.name, spec.quantize_fp8
         print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            if spec.max_model_len is not None:
+                vllm_kwargs["max_model_len"] = spec.max_model_len
+            if spec.max_pixels is not None:
+                vllm_kwargs["max_pixels"] = spec.max_pixels
+            if spec.max_tokens is not None:
+                vllm_kwargs["max_tokens"] = spec.max_tokens
+            current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:
                 logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)
@@ -222,11 +230,19 @@ def run_vlm_comparison(
         return
 
     for model_entry in models_list:
-        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        spec = parse_model_entry(model_entry)
+        model_name, quantize_fp8 = spec.name, spec.quantize_fp8
         print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            if spec.max_model_len is not None:
+                vllm_kwargs["max_model_len"] = spec.max_model_len
+            if spec.max_pixels is not None:
+                vllm_kwargs["max_pixels"] = spec.max_pixels
+            if spec.max_tokens is not None:
+                vllm_kwargs["max_tokens"] = spec.max_tokens
+            current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:
                 logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)
@@ -360,11 +376,19 @@ def run_prompting_experiments(
     logger.info("[inference:%s] enabled strategies: %s", experiment_name, list(enabled_strategies.keys()))
 
     for model_entry in models_list:
-        model_name, quantize_fp8 = parse_model_entry(model_entry)
+        spec = parse_model_entry(model_entry)
+        model_name, quantize_fp8 = spec.name, spec.quantize_fp8
         print(f"\n🤖 Inizializzazione Modello: {model_name} (backend: {backend}{', fp8' if quantize_fp8 else ''})")
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
-            current_model = VllmVLM(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
+            if spec.max_model_len is not None:
+                vllm_kwargs["max_model_len"] = spec.max_model_len
+            if spec.max_pixels is not None:
+                vllm_kwargs["max_pixels"] = spec.max_pixels
+            if spec.max_tokens is not None:
+                vllm_kwargs["max_tokens"] = spec.max_tokens
+            current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:
                 logger.warning("[inference:%s] fp8 requested for '%s' but backend is ollama; ignoring.", experiment_name, model_name)

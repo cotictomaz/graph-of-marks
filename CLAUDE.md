@@ -541,32 +541,95 @@ preprocessing phase. Net effect: the VLM gets the whole card. (Alternative
 considered and rejected: `skip_preprocessing: true` — valid only when images are
 already cached, and the goal was to run the whole pipeline in-process.)
 
+(The "demands 21.32 GiB **free** at startup" above is vLLM's *startup gate* — the
+secondary role of `gpu_memory_utilization`; its primary role is sizing the KV
+cache. See the corrected explanation in "vLLM load knobs" below. This is why
+`release_preprocessor` is the right fix — free the card, then a normal 0.90 util
+just works — rather than the auto-util sizer, which tries to squeeze into the
+memory the preprocessor left behind.)
+
 ### vLLM load knobs for a 24GB card — `VllmVLM` new params (`models.py`)
 
-An 8B VLM in bf16 barely fits a 24 GB 3090, and every vLLM default overshoots at
-some stage. `VllmVLM.__init__` now sets these (all overridable):
+> **⚠️ 2026-07-07 correction + fix applied — the earlier writeup of these knobs
+> (and the comments in `models.py`) encoded a wrong model of
+> `gpu_memory_utilization`.** The section below is the corrected understanding,
+> and the code has since been fixed to match it (see "What was changed in code"
+> at the end). The **measured numbers are still valid**; what changed is their
+> *interpretation*, which knob is the right lever, and the now-applied defaults.
+
+**How `gpu_memory_utilization` really works.** It is **not** "the memory vLLM
+demands be free at startup." It is the **total-budget cap**: vLLM sizes the KV
+cache as `KV = gpu_memory_utilization × total − weights − activation_peak −
+overhead`. So **higher util → *more* KV cache, not less.** There is *also* a
+startup gate (it won't reserve more than is currently free), which is the
+`free < desired` error — but that gate is the secondary role, not the main one.
+Getting this backwards is what drove the fragile auto-sizer below.
+
+`VllmVLM.__init__` currently sets these (all overridable):
 
 - **`gpu_memory_utilization` auto (`_auto_gpu_mem_util`, headroom 0.02 / cap 0.96).**
-  vLLM's startup check needs `util × total ≤ free`; auto-sizes to
-  `min(cap, free/total − headroom)`. It is a **narrow** window for an 8B bf16 VLM:
-  at util 0.85 the KV budget is **−2.22 GiB** (`No available memory for the cache
-  blocks`); at 0.94 **+0.22 GiB**; at 0.95 **+0.46 GiB** (works); at 0.96 the
-  startup check fails (`free 22.71 < desired 22.74 GiB`). Viable band ≈ 0.945–0.959;
-  the auto value lands ~0.95.
+  Auto-sizes to `min(cap, free/total − headroom)` from *currently-free* VRAM.
+  Measured on the 3090 (8B bf16): util 0.85 → KV **−2.22 GiB** (`No available
+  memory for the cache blocks`); 0.94 → **+0.22 GiB**; 0.95 → **+0.46 GiB**
+  (works); 0.96 → startup gate fails (`free 22.71 < desired 22.74 GiB`). Viable
+  band ≈ 0.945–0.959; auto lands ~0.95. **The correct reading of these numbers:**
+  they show KV is a *thin sliver* only because ~16 GB of weights + reserved KV +
+  ~1 GB CUDA-context overhead already fill the card — the low numbers are not a
+  law of nature, they are the consequence of running an 8B *at util ~0.95 on a
+  card that is never 100% clean*. **This auto-sizer is a mistake now that
+  `release_preprocessor` frees the card before load:** on a clean card it
+  computes ~0.96 and lands in the fail band, so it duplicates and *fights* the
+  preprocessor-release fix. A fixed **0.90** (vLLM's own default) is the robust
+  choice once the card is clean; raise it only to *buy* KV when weights already
+  fit. (The auto path is only genuinely useful if the preprocessor is *not*
+  released — which it now always is.)
 - **`enforce_eager=True`** — skips CUDA-graph capture (vLLM otherwise captures ~70
-  batch sizes, each reserving VRAM).
-- **`max_num_batched_tokens=2048`** — bounds the *profiling* activation. vLLM's
-  `profile_run` allocates activation for this many tokens *on top of* the weights,
-  which `gpu_memory_utilization` does **not** cap; at the default 8192 the process
-  peaked at **22.87 GiB** and OOM'd during profiling.
+  batch sizes, each reserving VRAM). Costs throughput; fine for a small run.
+- **`max_num_batched_tokens=2048`** — bounds the startup *profiling* activation
+  (allocated on top of the weights, **not** capped by `gpu_memory_utilization`);
+  the default 8192 peaked at **22.87 GiB** and OOM'd during profiling. **Footgun:
+  for multimodal, a single image's vision tokens generally can't be split across
+  prefill chunks, so a value below one image's token count fails with "multimodal
+  item cannot fit into max_num_batched_tokens" — it is coupled to `max_model_len`
+  and to the vision-token cap, and can't be raised/lowered in isolation.**
 - **`max_num_seqs=8`** — vLLM warms up the sampler with `max_num_seqs` (default
   **256**) dummy requests at once, which OOM'd; inference here is `batch_size=1`.
-- **`max_model_len=2048`** — native windows are absurd for VQA (Qwen3-VL = 262144)
-  and set the KV block size + the per-sequence KV minimum. **Known limitation:
-  2048 truncates GoM prompts (below); raising it is gated by the model-dependent
-  KV budget, so it likely needs to become a per-model setting.**
+- **`max_model_len=2048`** — caps context (native windows are absurd for VQA,
+  Qwen3-VL = 262144) and sets the KV block size + the per-sequence KV minimum.
+  **This is a self-inflicted wound, not just a "limitation": 2048 hard-truncates
+  GoM prompts (below) and is the direct cause of Qwen3-VL's `decoder prompt ...
+  longer than the maximum model length` error and of InternVL only fitting 6/15
+  examples.** It should be sized to the *measured* max prompt length and become
+  **per-model**; guessing 2048 is what breaks both models.
 - **`trust_remote_code=True`** — required to load `OpenGVLab/InternVL3_5-8B`
   (`InternVLChatModel`); harmless for natively-supported models.
+
+**What was changed in code (2026-07-07).** The three problems below were fixed
+in `models.py` (and threaded through `run_experiments.py`):
+1. **The false "8B eats ~22 GB in weights+activation" claim was corrected.** 8B
+   bf16 weights ≈ **16 GB**; single-sequence activation is small. A process
+   sitting at ~22 GB is there because util was ~0.95 and vLLM *reserved KV to
+   fill that budget* — that memory is mostly **desirable, controllable KV**, not
+   weights. The misleading comments (which had justified squeezing util to 0.96)
+   are rewritten to say so.
+2. **The auto-util sizer (`_auto_gpu_mem_util`) was removed** and
+   `gpu_memory_utilization` now defaults to a fixed **0.90**. It duplicated
+   `release_preprocessor` (which already frees the card before the VLM loads) and
+   drifted into the ~0.96 startup-fail band. Raise toward ~0.95 only to buy KV.
+3. **A multimodal-token control surface was added.** `VllmVLM` now accepts
+   `max_pixels` / `min_pixels` / `mm_processor_kwargs` (Qwen-style vision-token
+   caps, the real lever for oversized image prompts) and defaults
+   `limit_mm_per_prompt={"image": 1}` for single-image VQA. `max_num_batched_tokens`
+   now defaults to `max_model_len` (so a whole image always fits one prefill
+   chunk) instead of a fixed 2048 that could reject a large image.
+
+**Per-model sizing (also applied).** `parse_model_entry` now returns a
+`ModelSpec` dataclass, and a `models:` entry may carry per-model
+`max_model_len`, `max_pixels`, and `max_tokens` (in addition to `fp8`), threaded
+into `VllmVLM` by all three runners. `max_model_len` now defaults to **8192**
+(was 2048) — enough for InternVL's full GoM prompts — and should be set
+per-model to each model's *measured* max prompt length; Qwen3-VL additionally
+needs a `max_pixels` cap to bring its ~16k prompt under that window.
 
 ### Model reality on the 3090 (measured)
 
@@ -582,21 +645,27 @@ some stage. `VllmVLM.__init__` now sets these (all overridable):
   resolves it, **not** that vLLM serves it.) **Disabled in the config.**
 - **`google/gemma-3-12b-it` doesn't fit the 3090 in bf16** (~24 GB) and FP8 is
   unreliable (above). **Disabled on the 3090; run it on the 5090 in bf16.**
-- **The GoM-prompt token wall — the current blocker.** GoM prompts (annotated
-  image + scene-graph text) are large, and *how* large is very model-dependent
-  because the two VLMs' vision tokenizers differ ~4×:
-  - **`Qwen/Qwen3-VL-8B-Instruct`: ~16,000 tokens/prompt**, and it leaves only
-    **0.46 GiB** KV (~1,600 tokens). Irreconcilable — no `max_model_len` both holds
-    the prompt and fits the KV — so **every** request errors (`decoder prompt
-    (length 16081) is longer than the maximum model length`) and it scores 0.00%.
-    Qwen3-VL needs its image visual-token count cut (cap `max_pixels` / downscale)
-    to be usable at all, a GoM-fidelity trade-off.
+- **The GoM-prompt token wall — the current blocker (this is a *token-length*
+  problem, largely *not* a memory problem).** GoM prompts are an annotated image +
+  scene-graph text, and the token count is **dominated by the image's vision
+  tokens**, which differ ~4× between the two VLMs' vision encoders. The `2048`
+  `max_model_len` default is what turns this into a hard failure:
+  - **`Qwen/Qwen3-VL-8B-Instruct`: ~16,000 tokens/prompt** (overwhelmingly vision
+    tokens, not scene-graph text), so **every** request errors with `decoder
+    prompt (length 16081) is longer than the maximum model length` and it scores
+    0.00%. The reported "**0.46 GiB** KV (~1,600 tokens)" is a *consequence of
+    util ~0.95*, not the root cause — even with more KV the 16k prompt would still
+    blow past a sane `max_model_len`. **The fix is to cut the image's visual-token
+    count** (`mm_processor_kwargs={"max_pixels": ...}` / `limit_mm_per_prompt` /
+    downscale the GoM image), *then* set `max_model_len` to the resulting length —
+    a GoM-fidelity trade-off, but the only way to make Qwen3-VL usable. Raising KV
+    alone does nothing.
   - **`OpenGVLab/InternVL3_5-8B`: ~3,464–4,287 tokens/prompt**, and it leaves
-    **6.19 GiB** KV (22× concurrency at 2048). It **works**: loads, runs, completes
-    (`State COMPLETED`), scores real answers. At `max_model_len=2048` only 6/15
-    examples fit (13.33%); **raising `max_model_len` to ~5120–8192 (well within its
-    6.19 GiB KV) should let all examples run.** InternVL is the practical GoM model
-    on the 3090.
+    **6.19 GiB** KV. It **works**: loads, runs, completes (`State COMPLETED`),
+    scores real answers. At `max_model_len=2048` only 6/15 examples fit (13.33%)
+    **purely because 2048 truncates the longer prompts** — raising `max_model_len`
+    to ~5120–8192 (well within its 6.19 GiB KV) should let all examples run.
+    InternVL is the practical GoM model on the 3090.
 
 ### Current config state & open items
 
@@ -604,11 +673,20 @@ some stage. `VllmVLM.__init__` now sets these (all overridable):
   `num_images: 5` (was `-1`), all FP8 removed, and only `OpenGVLab/InternVL3_5-8B`
   active (LlamaV-o1 / Qwen3-VL / gemma-3-12b commented out). Restore Qwen3-VL and
   `num_images` for real runs once the token-budget issue is addressed.
-- **Open:** (1) raise `max_model_len` for InternVL and make it **per-model** (Qwen's
-  tiny KV can't afford a large one); (2) decide the image-token cap for Qwen3-VL;
-  (3) confirm the image-vs-text token split of a GoM prompt (trimming verbose
-  scene-graph text is lossless; downscaling the image is not); (4) preprocessing is
-  slow — **~100–135 s/image, ~28–37 h for the full 1000-image set**.
+- **Done (2026-07-07, see "What was changed in code" above):** per-model
+  `max_model_len` / `max_pixels` / `max_tokens` via `ModelSpec`; `max_model_len`
+  default 2048→8192; vision-token cap (`max_pixels`/`mm_processor_kwargs`) +
+  `limit_mm_per_prompt={"image":1}`; `max_num_batched_tokens` defaults to
+  `max_model_len`; auto-util sizer removed, `gpu_memory_utilization` fixed at 0.90;
+  false "22 GB weights" comments corrected.
+- **Open (still to verify on the 3090):** (1) **empirically tune per-model values**
+  — confirm InternVL runs all examples at `max_model_len: 8192`, and find the
+  `max_pixels` that brings Qwen3-VL's prompt under its window without wrecking GoM
+  fidelity (the values in `vlm_comparison.yaml` are first guesses, not measured).
+  (2) Confirm the image-vs-text token split of a GoM prompt (trimming verbose
+  scene-graph text is lossless; downscaling the image is a fidelity trade-off).
+  (3) Preprocessing is slow — **~100–135 s/image, ~28–37 h for the full
+  1000-image set**.
 
 ## Why preprocessing is slow & GPU-idle — the matplotlib viz bottleneck (2026-07-07)
 

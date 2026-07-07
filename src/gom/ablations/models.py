@@ -3,7 +3,8 @@ import gc
 import base64
 import ollama
 import vllm
-from typing import Optional, Tuple, Union, Dict, Any
+from dataclasses import dataclass
+from typing import Optional, Union, Dict, Any
 
 
 # Generation budgets. Reasoning / "thinking" models spend a large number of
@@ -36,26 +37,62 @@ def resolve_max_tokens(model_name: str, explicit: Optional[int] = None) -> int:
     return REASONING_MAX_TOKENS if is_reasoning_model(model_name) else DEFAULT_MAX_TOKENS
 
 
-def parse_model_entry(entry: Union[str, Dict[str, Any]]) -> Tuple[str, bool]:
+@dataclass
+class ModelSpec:
+    """Normalized description of one ``models:`` list entry.
+
+    Beyond the model name and FP8 flag, an entry may carry **per-model load
+    overrides** so a single config can size each model independently — a large
+    model can get a smaller ``max_model_len`` / a vision-token cap while smaller
+    models keep the defaults. All overrides default to ``None`` ("use the
+    ``VllmVLM`` default").
+
+    * ``max_model_len`` — context window cap for *this* model. Size it to the
+      model's **measured** max GoM-prompt length; the hard-coded default is only
+      a fallback and is the classic cause of "decoder prompt ... longer than the
+      maximum model length" when it is too small.
+    * ``max_pixels`` — Qwen-style vision-token cap (fewer pixels -> fewer image
+      tokens -> shorter prompt). The real lever for oversized image prompts
+      (e.g. Qwen3-VL's ~16k-token GoM prompts) — cheaper on KV than inflating
+      ``max_model_len``.
+    * ``max_tokens`` — generation cap override (else auto by reasoning-model
+      detection).
     """
-    Normalize one ``models:`` list entry into ``(model_name, quantize_fp8)``.
+    name: str
+    quantize_fp8: bool = False
+    max_model_len: Optional[int] = None
+    max_pixels: Optional[int] = None
+    max_tokens: Optional[int] = None
+
+
+def parse_model_entry(entry: Union[str, Dict[str, Any]]) -> ModelSpec:
+    """
+    Normalize one ``models:`` list entry into a :class:`ModelSpec`.
 
     An entry may be either:
-      * a plain string  -> ``"repo/id"``                       (bf16, no quantization)
-      * a mapping       -> ``{name: "repo/id", fp8: true}``    (load with FP8 quantization)
+      * a plain string  -> ``"repo/id"``                    (bf16, all defaults)
+      * a mapping       -> ``{name: "repo/id", fp8: true,
+                              max_model_len: 8192, max_pixels: 262144}``
 
-    The mapping form lets a config decide FP8 *per model* (e.g. to make a ~12B
-    model fit on a 24GB card while leaving smaller models in bf16). ``model`` is
-    accepted as an alias for ``name``, and ``quantize_fp8`` for ``fp8``.
+    The mapping form lets a config decide FP8 and load sizing *per model* (e.g.
+    to make a ~12B model fit on a 24GB card, or cap a model's vision tokens so
+    its GoM prompt fits ``max_model_len``). ``model`` is accepted as an alias for
+    ``name`` and ``quantize_fp8`` for ``fp8``.
     """
     if isinstance(entry, str):
-        return entry, False
+        return ModelSpec(name=entry)
     if isinstance(entry, dict):
         name = entry.get("name") or entry.get("model")
         if not name:
             raise ValueError(f"Model entry {entry!r} is missing a 'name' (or 'model') key.")
         fp8 = bool(entry.get("fp8", entry.get("quantize_fp8", False)))
-        return name, fp8
+        return ModelSpec(
+            name=name,
+            quantize_fp8=fp8,
+            max_model_len=entry.get("max_model_len"),
+            max_pixels=entry.get("max_pixels"),
+            max_tokens=entry.get("max_tokens"),
+        )
     raise ValueError(
         f"Unsupported model entry {entry!r}: expected a string or a mapping with a 'name' key."
     )
@@ -134,12 +171,16 @@ class VllmVLM:
         system_prompt: str = "",
         quantize_fp8: bool = False,
         max_tokens: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        max_model_len: Optional[int] = 2048,
-        max_num_batched_tokens: Optional[int] = 2048,
+        gpu_memory_utilization: float = 0.90,
+        max_model_len: Optional[int] = 8192,
+        max_num_batched_tokens: Optional[int] = None,
         enforce_eager: bool = True,
         max_num_seqs: Optional[int] = 8,
         trust_remote_code: bool = True,
+        max_pixels: Optional[int] = None,
+        min_pixels: Optional[int] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        limit_mm_per_prompt: Optional[Dict[str, int]] = None,
     ):
         try:
             from vllm import LLM, SamplingParams
@@ -156,6 +197,8 @@ class VllmVLM:
         # bf16 loads (the default) behave exactly as before. On-the-fly FP8
         # roughly halves the weight footprint (e.g. a ~12B model ~24GB -> ~13GB),
         # letting it fit on a single 24GB GPU with negligible accuracy loss.
+        # (NB: FP8 is emulated via Marlin on Ampere/sm_86 and fails on some dims —
+        # use bf16 on the RTX 3090; see CLAUDE.md.)
         llm_kwargs: Dict[str, Any] = {"model": self.model_name}
         if quantize_fp8:
             llm_kwargs["quantization"] = "fp8"
@@ -167,26 +210,36 @@ class VllmVLM:
         if trust_remote_code:
             llm_kwargs["trust_remote_code"] = True
 
-        # Cap the context length. These VLMs advertise huge native windows
-        # (e.g. Qwen3-VL = 262144); vLLM sizes KV-cache blocks for that and its
-        # profiling dummy run to match, which OOMs a 24GB card. It also sets the
-        # *minimum* KV the engine must reserve for a single sequence — and an 8B
-        # bf16 VLM already eats ~22GB in weights+activation, leaving almost no KV
-        # room, so a large window makes startup fail with "No available memory for
-        # the cache blocks". A VQA prompt (scene-graph text + one image + a short
-        # answer) is well under 2048 tokens, so 2048 keeps the per-sequence KV
-        # requirement (~0.28GB) inside the sliver of KV an 8B bf16 VLM leaves on a
-        # 24GB card. Pass None to use the model's native maximum.
+        # --- Context length (KV block size + the HARD prompt-length ceiling) ---
+        # `max_model_len` is BOTH the per-sequence KV size vLLM reserves AND the
+        # ceiling a prompt may not exceed. The native windows these VLMs advertise
+        # are absurd for VQA (Qwen3-VL = 262144) and would size the KV blocks for
+        # that, so we always cap it. This is the single most failure-prone knob: a
+        # GoM prompt is dominated by the image's *vision* tokens, and those counts
+        # differ ~4x between encoders (InternVL ~3.5-4.3k, Qwen3-VL ~16k for the
+        # SAME scene). If `max_model_len` is below a model's actual prompt length,
+        # EVERY request errors with "decoder prompt ... longer than the maximum
+        # model length". So size it to the model's MEASURED max prompt length
+        # (per-model, via the config entry's `max_model_len:` key); the 8192
+        # default is only a fallback. For a model whose prompts are still too long
+        # (Qwen3-VL), cap the vision tokens with `max_pixels` below rather than
+        # inflating `max_model_len` — a huge window blows the KV budget and does
+        # NOT shorten the prompt. Pass None to use the model's native maximum.
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
 
-        # Bound the startup memory-profiling batch. vLLM's `profile_run` allocates
-        # transient activation for `max_num_batched_tokens` tokens *on top of* the
-        # weights and before the KV cache is sized — `gpu_memory_utilization` does
-        # NOT cap it. At the default 8192 this overshot and OOM'd an 8B model on a
-        # 24GB card; a smaller batch also shrinks the measured activation so more
-        # of the card is left for the KV cache. 2048 still holds one image +
-        # scene-graph prompt (chunked prefill splits anything longer).
+        # --- Startup profiling batch (MUST be able to hold one whole image) ----
+        # vLLM's startup `profile_run` allocates transient activation for
+        # `max_num_batched_tokens` tokens on top of the weights (NOT capped by
+        # `gpu_memory_utilization`), so an over-large value can OOM at profiling.
+        # But a too-SMALL value is a multimodal footgun: a single image's vision
+        # tokens can't be split across prefill chunks, so if this is below one
+        # image's token count the engine fails with "multimodal item cannot fit
+        # into max_num_batched_tokens". We therefore default it to `max_model_len`
+        # (guaranteeing any single prompt+image fits one chunk); override only if
+        # profiling OOMs and you know a single image fits the smaller value.
+        if max_num_batched_tokens is None and max_model_len is not None:
+            max_num_batched_tokens = max_model_len
         if max_num_batched_tokens is not None:
             llm_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
 
@@ -205,16 +258,40 @@ class VllmVLM:
         if max_num_seqs is not None:
             llm_kwargs["max_num_seqs"] = max_num_seqs
 
-        # vLLM's startup check requires `gpu_memory_utilization * total` VRAM to
-        # be *free*, and it defaults to 0.9. But in this pipeline the GoM
-        # preprocessor (YOLO/SAM/Detectron2/CLIP, ~6GB) is already resident on
-        # the same card when the VLM loads, so demanding 90% of the card fails
-        # with "Free memory ... less than desired GPU memory utilization" before
-        # the weights are even read. Auto-size the reservation to what is
-        # actually free right now (minus a small headroom), capped at 0.9 so a
-        # clean card behaves exactly as before. Explicit values win.
-        if gpu_memory_utilization is None:
-            gpu_memory_utilization = self._auto_gpu_mem_util()
+        # Single-image VQA: profile for at most one image per prompt (vLLM's
+        # default assumes more, inflating the profiling activation).
+        if limit_mm_per_prompt is None:
+            limit_mm_per_prompt = {"image": 1}
+        llm_kwargs["limit_mm_per_prompt"] = limit_mm_per_prompt
+
+        # --- Vision-token cap (the real lever for oversized image prompts) -----
+        # For Qwen-family processors, `max_pixels`/`min_pixels` bound how many
+        # visual tokens an image expands to (fewer pixels -> fewer tokens ->
+        # shorter prompt). This is how a ~16k-token Qwen3-VL GoM prompt is brought
+        # under a sane `max_model_len` WITHOUT touching the KV budget. Threaded
+        # through `mm_processor_kwargs`; a caller may also pass an explicit
+        # `mm_processor_kwargs` (e.g. InternVL's `max_dynamic_patch`), whose keys
+        # win over the pixel shortcuts.
+        mm_kwargs: Dict[str, Any] = dict(mm_processor_kwargs or {})
+        if max_pixels is not None:
+            mm_kwargs.setdefault("max_pixels", max_pixels)
+        if min_pixels is not None:
+            mm_kwargs.setdefault("min_pixels", min_pixels)
+        if mm_kwargs:
+            llm_kwargs["mm_processor_kwargs"] = mm_kwargs
+
+        # --- GPU memory budget -------------------------------------------------
+        # `gpu_memory_utilization` is the TOTAL-budget cap, NOT "free memory
+        # demanded at startup": vLLM sizes the KV cache as
+        #   KV = gpu_memory_utilization * total - weights - activation - overhead
+        # so a HIGHER value buys MORE KV (an 8B model is ~16GB of weights, not the
+        # ~22GB an earlier comment claimed — the rest of a full card is reserved,
+        # controllable KV). `main.py` frees the GoM preprocessor
+        # (release_preprocessor) BEFORE the VLM loads, so the card is clean and
+        # vLLM's normal 0.90 default just works. (The old auto-sizer that read
+        # free VRAM and crept to ~0.96 has been removed: it duplicated the
+        # preprocessor-release fix and drifted into a fragile startup-fail band.)
+        # Raise this toward ~0.95 only to buy extra KV once the weights already fit.
         if gpu_memory_utilization is not None:
             llm_kwargs["gpu_memory_utilization"] = gpu_memory_utilization
 
@@ -222,43 +299,12 @@ class VllmVLM:
             f"[VllmVLM] Loading model: {self.model_name}"
             + (" (fp8)" if quantize_fp8 else "")
             + (f" (gpu_mem_util={gpu_memory_utilization:.2f})" if gpu_memory_utilization else "")
+            + (f" (max_model_len={max_model_len})" if max_model_len else "")
+            + (f" (mm={mm_kwargs})" if mm_kwargs else "")
         )
         self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(max_tokens=self.max_tokens, temperature=0.0)
         print(f"[VllmVLM] Model loaded: {self.model_name} (max_tokens={self.max_tokens})")
-
-    @staticmethod
-    def _auto_gpu_mem_util(headroom: float = 0.02, cap: float = 0.96) -> Optional[float]:
-        """Fraction of the card vLLM may reserve, sized to what is free *now*.
-
-        Returns ``min(cap, free/total - headroom)`` from the current CUDA device,
-        so the reservation fits alongside anything already resident (e.g. the GoM
-        preprocessor, if it hasn't been released yet). Falls back to ``None``
-        (vLLM's own 0.9 default) if the free VRAM can't be read.
-
-        The cap is high (0.95) because an 8B bf16 VLM already needs ~22GB of
-        weights + activation on a 24GB card, so the KV cache only gets whatever is
-        left of `gpu_memory_utilization * total` — too low a value yields negative
-        KV and a "No available memory for the cache blocks" failure. The transient
-        profiling-activation OOM that a high value used to cause is now handled
-        separately by `enforce_eager` + a small `max_num_batched_tokens` (which cut
-        the activation peak), so it is safe to reserve most of the card here. The
-        `free/total - headroom` term still steps the value down automatically if
-        the card isn't fully free when the engine loads.
-        """
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                return None
-            free_b, total_b = torch.cuda.mem_get_info()
-            if not total_b:
-                return None
-            util = (free_b / total_b) - headroom
-            # Clamp: never above `cap` (clean-card behaviour) nor below a floor
-            # that couldn't host any model (surfaces a real OOM instead).
-            return round(max(0.30, min(cap, util)), 2)
-        except Exception:
-            return None
 
     def generate(self, prompt: str, image_path: str) -> str:
         if not os.path.exists(image_path):

@@ -40,20 +40,32 @@ vlm_comparison:
   skip_preprocessing: false  # true = images already exist at {base_dir}/preprocessed_images/vlm_comparison/default/
 
   # Add/remove Hugging Face repo IDs here to change which models are compared.
-  # An entry may be a plain string (loaded in bf16) or a mapping with `fp8: true`
-  # to FP8-quantize that model on load (see gom.ablations.models.parse_model_entry).
-  # These load in plain bf16: main.py now releases the GoM preprocessor's GPU
-  # memory after preprocessing (before the VLM loop), so each model gets the full
-  # 24GB card. FP8 is intentionally avoided on the RTX 3090 — Ampere has no
-  # hardware FP8, so vLLM emulates it via Marlin, which needs layer dims divisible
-  # by 64 and fails on these architectures (e.g. Qwen3-VL's 4304).
+  # An entry may be a plain string (loaded in bf16) or a mapping carrying per-model
+  # load overrides (see gom.ablations.models.parse_model_entry / ModelSpec):
+  #     - name: "repo/id"
+  #       fp8: false            # FP8-quantize on load (dead on the RTX 3090; use bf16)
+  #       max_model_len: 8192   # context cap = KV size + HARD prompt-length ceiling;
+  #                             #   size to the model's MEASURED max GoM-prompt length
+  #                             #   (default 8192). Too small => "decoder prompt ...
+  #                             #   longer than the maximum model length" on every request.
+  #       max_pixels: 200704    # Qwen-style vision-token cap: shrinks the image's token
+  #                             #   count so an oversized prompt fits max_model_len WITHOUT
+  #                             #   spending KV. The real lever for Qwen3-VL's ~16k prompts.
+  #       max_tokens: 512       # generation cap override (else auto by reasoning-model type)
+  # main.py releases the GoM preprocessor's GPU memory after preprocessing (before
+  # the VLM loop), so each model gets the full 24GB card at gpu_memory_utilization=0.90.
+  # FP8 is intentionally avoided on the RTX 3090 — Ampere has no hardware FP8, so vLLM
+  # emulates it via Marlin, which needs layer dims divisible by 64 and fails here.
   # PREPROCESSING-ONLY (2026-07-06): models emptied to disable VLM inference — this
   # run just builds & caches the preprocessed images. Restore for real runs (bf16;
   # see CLAUDE.md "Ablations end-to-end on faretra" for per-model status on the 3090):
-  #   - "omkarthawakar/LlamaV-o1"        # DISABLED: mllama not servable by vllm 0.11.0 + transformers 4.57.6
-  #   - "Qwen/Qwen3-VL-8B-Instruct"      # ~16k-token GoM prompts exceed its KV budget on a 3090
-  #   - "OpenGVLab/InternVL3_5-8B"       # the model that actually runs on the 3090 (~4k-token prompts, 6.19GB KV)
-  #   - name: "google/gemma-3-12b-it"    # DISABLED on 3090: too big in bf16, FP8 dead on Ampere
+  #   - "omkarthawakar/LlamaV-o1"          # DISABLED: mllama not servable by vllm 0.11.0 + transformers 4.57.6
+  #   - name: "Qwen/Qwen3-VL-8B-Instruct"  # ~16k-token GoM prompts: MUST cap vision tokens
+  #     max_pixels: 200704                 #   first guess — tune down until the prompt fits 8192
+  #     max_model_len: 8192
+  #   - name: "OpenGVLab/InternVL3_5-8B"   # the model that runs on the 3090 (~4k-token prompts, 6.19GB KV)
+  #     max_model_len: 8192                #   fits all examples (2048 truncated 9/15)
+  #   - name: "google/gemma-3-12b-it"      # DISABLED on 3090: too big in bf16, FP8 dead on Ampere
   #     fp8: true
   models: []
 
