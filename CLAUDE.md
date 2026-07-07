@@ -610,6 +610,59 @@ some stage. `VllmVLM.__init__` now sets these (all overridable):
   scene-graph text is lossless; downscaling the image is not); (4) preprocessing is
   slow — **~100–135 s/image, ~28–37 h for the full 1000-image set**.
 
+## Why preprocessing is slow & GPU-idle — the matplotlib viz bottleneck (2026-07-07)
+
+Symptom that prompted this: two ablation jobs (`ablation_experiments.yaml` on
+`moro232`, `vlm_comparison.yaml` on `faretra`) showed **~0% GPU utilization** in
+the cluster web UI while in the preprocessing phase. **This is expected, not a
+hang.** Sampling `nvidia-smi` on the job nodes (`srun --jobid=<id> --overlap
+nvidia-smi`) shows GPU util *fluctuating* (e.g. faretra GPU0 51→56→66→0→0%, ~6–7 GB
+resident for the preprocessor) and the tqdm `Preprocessing` bar advancing — the
+job is progressing. The flat-0% snapshots are the **CPU-bound matplotlib
+rendering** of each scene, during which the GPU (detectors/SAM/depth/CLIP) is
+idle. On the crowded VQA scenes rendering dominates the per-image time.
+
+**Where the time goes (all in `src/gom/viz/visualizer.py`).** Render entry is
+`draw()` (`visualizer.py:299`), which runs `_create_canvas` → `_draw_objects` →
+`_draw_labels` → `_draw_relationships` → `_draw_legend` → `_finalize_figure`.
+Two dominant cost centers (profiled on a 640×425, ~75-relation scene):
+
+- **`draw(dpi=800)` default (`visualizer.py:310`).** `_create_canvas`
+  (`:507`) builds `plt.subplots(figsize=(W/100, H/100))` (`:528`), so a 640×425
+  image renders on a ~5120×3400 canvas — the final `savefig`/image resample
+  alone was **~11.7 s**.
+- **`_draw_relationships()` (`visualizer.py:838`) — the ~58.5 s hotspot.** Per
+  relation it builds a curved `FancyArrowPatch` (`connectionstyle="arc3"`,
+  `:918`) + a rounded-bbox `ax.text()` label (`:954`) — linear in relation count.
+  The real killer is **label-overlap resolution** (`:986–1059`): it calls
+  `fig.canvas.draw()` (`:988`, and again in helpers at `:1126`, `:1362`) — a full
+  canvas rasterization *just to measure text boxes* via `get_window_extent()`
+  (~22 s cumulative, forcing `text._get_layout` ~15 s + repeated font-manager
+  hashing) — then runs the adjustText-style iterative solver
+  (`_resolve_relation_vs_relation_overlaps` `:2047`, `_resolve_overlaps` `:2319`)
+  **up to four times per image**. That "draw-canvas → measure → nudge → repeat"
+  loop is what pins one CPU core and produces the flat-0%-GPU profile. Object
+  labels have the same pattern in `_draw_labels()` (`:1064`, canvas-draw at
+  `:1126`).
+
+**Why it can't be cached / re-runs per grid point.** The whole path is gated by
+`cfg.display_relationships` / `cfg.display_relation_labels` / `cfg.resolve_overlaps`
+(`:875`, `:932`, `:986`), and the ablation grids toggle exactly these viz knobs,
+so `_draw_relationships` re-runs for every grid point.
+
+**Cheapest high-impact levers, in order:** (1) drop `dpi=800`→~150–200 in
+`draw()` (`:310`) — near-linear speedup; a `RENDERING_OPT_AVAILABLE` fast path
+(`visualizer.py:65/68`, used at `:709`/`:1120`) is worth checking. (2) Gate
+`resolve_overlaps` or cap its iterations — the four solver passes (each doing a
+full `fig.canvas.draw()`) are the single biggest cost. (3) Longer term: replace
+the `FancyArrowPatch`/text path with PIL/cv2 drawing to eliminate the
+canvas-redraw-to-measure loop entirely. None of these has been applied yet.
+
+**Op note:** logs/stdout for a job live on the **local disk of its node** (no
+shared FS), so `slurm-<id>.out` is only readable from the node it ran on — read a
+remote job's log via `srun --jobid=<id> --overlap tail .../slurm-<id>.out`, not
+from the submit host.
+
 ## Legacy / Reference Files
 
 - `src/all_in_one_gom.py` — monolithic prototype; not part of the packaged API

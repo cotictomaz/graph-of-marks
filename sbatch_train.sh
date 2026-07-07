@@ -13,10 +13,10 @@ set -euo pipefail
 # nvidia_geforce_rtx_3090; don't request more GPU than a job actually needs.
 
 # Ablation grid experiments (edge thickness, relation caps, edge color, ...)
-sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/ablation_experiments.yaml
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 -w faretra run_docker.sh slurm_configs/ablation_experiments.yaml
 
 # VLM comparison across models on a fixed preprocessing configuration
-sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/vlm_comparison.yaml
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 -w faretra run_docker.sh slurm_configs/vlm_comparison.yaml
 
 # Prompting strategy comparison (baseline, few-shot, CoT, graph-guided, ...)
-sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 run_docker.sh slurm_configs/prompting_experiments.yaml
+sbatch -N 1 --gpus=nvidia_geforce_rtx_3090:1 -w faretra run_docker.sh slurm_configs/prompting_experiments.yaml
