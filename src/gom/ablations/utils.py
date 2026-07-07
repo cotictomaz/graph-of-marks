@@ -417,21 +417,30 @@ def run_preprocessing(
 
     # Respect the optional image cap.
     img_list = list(by_img)[:max_imgs] if max_imgs > 0 else list(by_img)
+
+    # Flatten to (image, question) pairs so the progress bar counts the same
+    # unit the completion status does. Each image contributes one preprocessed
+    # output *per question*, so a 100-image / 3-questions run is 300 pairs — the
+    # bar must show 300, not 100, or it disagrees with the "N/300 done" line.
+    pairs: List[Tuple[str, "VQAExample"]] = []
+    for img in img_list:
+        # Respect the optional per-image question cap.
+        qs = by_img[img][:max_qpi] if max_qpi > 0 else by_img[img]
+        for ex in qs:
+            pairs.append((img, ex))
+
     try:
         from tqdm import tqdm
     except Exception:
         # If tqdm is not installed, fall back to a no-op wrapper.
         tqdm = lambda x, **_: x  # type: ignore
 
-    for img in tqdm(img_list, desc="Preprocessing"):
-        # Respect the optional per-image question cap.
-        qs = by_img[img][:max_qpi] if max_qpi > 0 else by_img[img]
-        for ex in qs:
-            preprocess_for_qa(
-                ex.image_path, ex.question,
-                output_folder=preproc_folder,
-                apply_question_filter=not disable_q_filter,
-                preproc_obj=preproc_obj,
-                cfg_overrides=cfg_overrides,
-                image_dir=image_dir,
-            )
+    for _img, ex in tqdm(pairs, desc="Preprocessing", unit="pair"):
+        preprocess_for_qa(
+            ex.image_path, ex.question,
+            output_folder=preproc_folder,
+            apply_question_filter=not disable_q_filter,
+            preproc_obj=preproc_obj,
+            cfg_overrides=cfg_overrides,
+            image_dir=image_dir,
+        )

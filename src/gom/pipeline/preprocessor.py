@@ -2626,7 +2626,11 @@ class ImageGraphPreprocessor:
             
             filtered_relations = updated_relations
         else:
-            filtered_relations = None
+            # No incoming relations to filter. Return an empty list (not None):
+            # callers iterate over the returned relations unconditionally
+            # (e.g. `for rel in rels_all` in process_single_image), so None
+            # would raise "'NoneType' object is not iterable".
+            filtered_relations = []
         
         if getattr(self.cfg, "verbose", False):
             self.logger.info(f"[SINGLETON] Filtered {len(boxes)} → {len(filtered_boxes)} objects (target + connected)")
