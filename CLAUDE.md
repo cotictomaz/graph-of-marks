@@ -682,13 +682,61 @@ params), so grid points 2..N of every experiment reuse the first pass's masks.
   (host RAM, harmless to VRAM); the cache is freed on the preprocessor's `__del__`
   or when it is rebuilt. Clearing it in `release_preprocessor` is a possible tidy-up.
 
-### Relations / CLIP inference cache — PLANNED (next step, not yet implemented)
+### Relations / CLIP inference cache — implemented (`pipeline/preprocessor.py`)
 
-The bigger win: `relations_inferencer.infer(...)` (`preprocessor.py:3854`, the
-O(n²) CLIP pair scoring) is the top per-pair cost and is recomputed every grid
-point. See the plan being drafted for this — same correct-by-construction,
-deep-copy-safe approach, keyed on `infer()`'s actual inputs including a
-`relations_config` signature so grids that *do* feed `infer()` correctly miss.
+The bigger win: `relations_inferencer.infer(...)` (`preprocessor.py`, the O(n²)
+CLIP pair scoring) is the top per-pair cost and was recomputed every grid point.
+It is now cached at that single call site (`_infer_relations_cached`), same
+correct-by-construction, deep-copy-safe shape as the segmentation cache.
+
+- **Why the raw `infer()` output is grid-invariant (the key enabling fact).**
+  `infer()` reads only `self.relations_inferencer.config` (a `RelationsConfig`),
+  and within its body (`inference.py:456–959`) it consumes only geometry/CLIP
+  params (`min_distance`, `max_distance`, `per_src_clip_pairs`, `max_clip_pairs`,
+  `depth_front_threshold`, `depth_touching_threshold`, `check_support`) — **none
+  of which are grid params.** The grid's relation-cap params (`max_relations`,
+  `max_relations_per_object`, `min_relations_per_object`,
+  `auto_adjust_relation_cap`) are read **only** in the POST-infer
+  `limit_relationships_per_object` (`inference.py:1049–1200`). So every grid
+  point — including the `max_relations*` cap grids — produces identical raw
+  `infer()` output for a given (image, question) and reuses one cached result.
+- **The key** (`_generate_relations_cache_key`) hashes infer's actual inputs:
+  image bytes, `boxes`/`labels`/`depths` **in order** (relation `src_idx`/
+  `tgt_idx` index into them), a cheap **mask fingerprint** `(shape, #true px)`
+  per mask (masks are `f(image, boxes)` so redundant, but this removes the
+  "trust SAM determinism" assumption at ~µs), `clip_threshold`,
+  `use_geometry`/`use_clip`, sorted `question_rel_terms`, and a **config
+  signature**. `depth_map` is intentionally omitted (pure `f(image)`, already
+  keyed via the image hash).
+- **The config signature is a DENYLIST, not an allowlist**
+  (`_relations_config_signature` + module-level `_RELATIONS_KEY_CONFIG_DENYLIST`).
+  It serialises `asdict(self.relations_inferencer.config)` **minus** the 4
+  grid-mutated, verified-post-infer-only fields above. Default-include-everything
+  means a field `infer()` starts reading in the future is captured
+  automatically; excluding the 4 cap params is what lets the cap grids reuse the
+  cache (a full-config hash would false-miss on 12 of the 20 grid points → ~1.5×
+  instead of ~20× on this stage). **If a new grid param is added that `infer()`
+  reads, it must NOT be added to the denylist.**
+- **Deep-copy discipline** (mandatory): downstream code filters and may mutate
+  relation dicts in place (`_clean_invalid_relations`, singleton filters,
+  `limit_relationships_per_object`, `drop_inverse_duplicates`), so
+  `_infer_relations_cached` stores a `deepcopy` on miss and returns a `deepcopy`
+  on hit. Dicts are tiny; memory is negligible (`relations_cache_max_size_mb`
+  default 512). Passthrough (no keying) when disabled or `len(boxes) <= 1`
+  (`infer` early-returns `[]`).
+- **Config flags:** `enable_relations_cache=True`, `relations_cache_max_items=8192`,
+  `relations_cache_max_size_mb=512.0`. `enable_relations_cache=False` reproduces
+  old behaviour exactly.
+- **Two pre-existing, orthogonal issues surfaced while wiring this (NOT fixed):**
+  (1) `preprocessor.py` sets `self.relations_inferencer.relations_config = r_cfg`,
+  but the inferencer has no such property — `infer()` reads `self.config`, so the
+  per-call "tuned limits" `r_cfg` are dead. The cache correctly keys off the real
+  `self.config`, so it is unaffected. (2) `ablate_max_*` are read via
+  `getattr(self.config, …)` but are not declared `RelationsConfig` fields, so
+  `update_cfg_correct`'s `hasattr` guard never sets them on the inferencer.
+
+Both the segmentation and relations caches live on the **`efficiency_caching`**
+branch (not `main`).
 
 ## Legacy / Reference Files
 

@@ -298,7 +298,7 @@ import math
 import os
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -396,6 +396,24 @@ to_triples_text = graph_to_triples_text
 
 # Visualization modules
 from gom.viz.visualizer import Visualizer, VisualizerConfig
+
+
+# RelationsConfig fields deliberately EXCLUDED from the relations cache key.
+# These are the only grid-mutated RelationsConfig fields, and they are read
+# exclusively in the POST-infer cap stage (RelationInferencer
+# .limit_relationships_per_object, inference.py:1049-1200) — never inside
+# infer() itself (inference.py:456-959). Excluding them lets every ablation
+# grid point (including the max_relations* cap grids) reuse the same cached
+# infer() output; including them would false-miss on those grids. Everything
+# else in RelationsConfig is included by default, so a field infer() starts
+# reading in the future is captured automatically. If a NEW grid param is
+# added that infer() reads, it must NOT be added here.
+_RELATIONS_KEY_CONFIG_DENYLIST = frozenset({
+    "max_relations",
+    "max_relations_per_object",
+    "min_relations_per_object",
+    "auto_adjust_relation_cap",
+})
 
 
 # ----------------------------- Configuration -----------------------------
@@ -606,6 +624,17 @@ class PreprocessorConfig:
     enable_segmentation_cache: bool = True  # Cache SAM masks keyed on (image, boxes)
     segmentation_cache_max_items: int = 8192  # Max distinct (image, boxes) entries
     segmentation_cache_max_size_mb: float = 8192.0  # Host-RAM ceiling for cached masks
+
+    # Relations (CLIP O(n^2)) caching (performance optimization). The raw output
+    # of RelationInferencer.infer() is invariant across every ablation grid point
+    # (the grid's relation-cap params are read only in the POST-infer
+    # limit_relationships_per_object, never inside infer), so it is cached at the
+    # single infer() call site. Relation dicts are tiny, so memory is negligible.
+    # See _generate_relations_cache_key / _infer_relations_cached and the
+    # _RELATIONS_KEY_CONFIG_DENYLIST for the correctness reasoning.
+    enable_relations_cache: bool = True  # Cache infer() output keyed on its actual inputs
+    relations_cache_max_items: int = 8192  # Max distinct (image, boxes, question) entries
+    relations_cache_max_size_mb: float = 512.0  # Host-RAM ceiling for cached relations
 
     # Detection image resizing (for faster inference)
     detection_resize: bool = True  # Resize images before detection
@@ -861,6 +890,18 @@ class ImageGraphPreprocessor:
         else:
             self._segmentation_cache = None
 
+        # LRU relations cache (host RAM). The raw infer() output is invariant
+        # across ablation grid points (grid params only feed the post-infer cap),
+        # so reuse it across grid points instead of re-running CLIP O(n^2).
+        # Correct-by-construction: the key is a hash of infer()'s actual inputs.
+        if getattr(self.cfg, "enable_relations_cache", True):
+            self._relations_cache = LRUCache(
+                max_items=getattr(self.cfg, "relations_cache_max_items", 8192),
+                max_size_mb=getattr(self.cfg, "relations_cache_max_size_mb", 512.0),
+            )
+        else:
+            self._relations_cache = None
+
         # Support for custom user-defined functions
         # These can be set by the high-level API (GraphOfMarks)
         self._custom_detector = None
@@ -877,6 +918,10 @@ class ImageGraphPreprocessor:
         # Clear segmentation-mask cache
         if hasattr(self, '_segmentation_cache') and self._segmentation_cache is not None:
             self._segmentation_cache.clear()
+
+        # Clear relations cache
+        if hasattr(self, '_relations_cache') and self._relations_cache is not None:
+            self._relations_cache.clear()
 
         # Clear detector models
         if hasattr(self, 'detectors'):
@@ -1249,6 +1294,163 @@ class ImageGraphPreprocessor:
             # Caching is best-effort; a failure to store must never abort a run.
             pass
         return masks
+
+    def _relations_config_signature(self) -> str:
+        """
+        Stable JSON signature of the RelationsConfig that ``infer()`` actually
+        reads (``self.relations_inferencer.config``), with the post-infer-only
+        grid params in ``_RELATIONS_KEY_CONFIG_DENYLIST`` removed.
+
+        Default-include everything else so a field ``infer()`` starts reading in
+        the future is captured automatically; values are coerced (floats rounded,
+        unknown types ``str()``-ified) so any field type is safely serializable.
+        """
+        inferencer = getattr(self, "relations_inferencer", None)
+        cfg = getattr(inferencer, "config", None) if inferencer is not None else None
+        if cfg is None:
+            return "none"
+        try:
+            raw = asdict(cfg)
+        except Exception:
+            raw = dict(vars(cfg)) if hasattr(cfg, "__dict__") else {}
+
+        def _coerce(v: Any) -> Any:
+            if isinstance(v, bool) or isinstance(v, int) or v is None:
+                return v
+            if isinstance(v, float):
+                return round(v, 6)
+            if isinstance(v, str):
+                return v
+            if isinstance(v, (list, tuple)):
+                return [_coerce(x) for x in v]
+            if isinstance(v, dict):
+                return {str(k): _coerce(x) for k, x in v.items()}
+            return str(v)
+
+        filtered = {
+            k: _coerce(v)
+            for k, v in raw.items()
+            if k not in _RELATIONS_KEY_CONFIG_DENYLIST
+        }
+        return json.dumps(filtered, sort_keys=True)
+
+    def _mask_fingerprint(self, masks: Optional[Sequence[Any]]) -> List[Any]:
+        """
+        Cheap, deterministic fingerprint of a mask list — ``(shape, #true px)``
+        per mask. Masks are a pure function of (image, boxes) which are already
+        in the key, so this is a redundancy guard that removes the implicit
+        "SAM is deterministic" assumption at ~microsecond cost (a numpy ``sum``).
+        """
+        if not masks:
+            return []
+        fp: List[Any] = []
+        for m in masks:
+            seg = m.get("segmentation") if isinstance(m, dict) else None
+            if seg is None:
+                fp.append(None)
+                continue
+            try:
+                shape = [int(x) for x in getattr(seg, "shape", ())]
+                total = int(np.asarray(seg).sum())
+                fp.append([shape, total])
+            except Exception:
+                fp.append("err")
+        return fp
+
+    def _generate_relations_cache_key(
+        self,
+        image_pil: Image.Image,
+        boxes: Sequence[Any],
+        labels: Optional[Sequence[Any]],
+        depths: Optional[Sequence[Any]],
+        masks: Optional[Sequence[Any]],
+        clip_threshold: float,
+        use_geometry: bool,
+        use_clip: bool,
+        question_rel_terms: Optional[Any],
+    ) -> str:
+        """
+        Deterministic key for a ``RelationInferencer.infer()`` call, hashing its
+        actual inputs. ``depth_map`` is intentionally omitted: it is a pure
+        function of the image (deterministic, itself cached), and the image is
+        already in the key — so an identical image implies an identical depth
+        map. ``boxes``/``labels``/``depths`` are kept **in order** because
+        relation ``src_idx``/``tgt_idx`` index into them.
+        """
+        img_bytes = image_pil.tobytes()[:1024 * 1024]
+        img_hash = hashlib.md5(img_bytes).hexdigest()[:16]
+        payload = {
+            "size": list(image_pil.size),
+            "boxes": [[round(float(c), 2) for c in box] for box in boxes],
+            "labels": [str(l) for l in (labels or [])],
+            "depths": [round(float(d), 4) for d in (depths or [])],
+            "masks": self._mask_fingerprint(masks),
+            "clip_threshold": round(float(clip_threshold), 4),
+            "use_geometry": bool(use_geometry),
+            "use_clip": bool(use_clip),
+            "rel_terms": sorted(str(t) for t in question_rel_terms) if question_rel_terms else [],
+            "cfg": self._relations_config_signature(),
+        }
+        payload_hash = hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+        return f"rel_{img_hash}_{payload_hash}"
+
+    def _infer_relations_cached(
+        self,
+        *,
+        image_pil: Image.Image,
+        boxes: Sequence[Any],
+        labels: Optional[Sequence[Any]],
+        masks: Optional[Sequence[Any]],
+        depths: Optional[Sequence[Any]],
+        depth_map: Optional[Any],
+        use_geometry: bool,
+        use_clip: bool,
+        clip_threshold: float,
+        question_rel_terms: Optional[Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Run ``self.relations_inferencer.infer(...)`` with an (inputs)-keyed cache
+        in front of the O(n^2) CLIP scoring.
+
+        Deep-copy discipline (as for segmentation): downstream code filters and
+        may mutate relation dicts in place, so the cache never hands out a shared
+        object — store a ``deepcopy`` on miss, return a ``deepcopy`` on hit.
+        Passthrough (no keying) when the cache is disabled or ``len(boxes) <= 1``
+        (``infer`` early-returns ``[]`` there anyway).
+        """
+        def _run() -> List[Dict[str, Any]]:
+            return self.relations_inferencer.infer(
+                image_pil=image_pil,
+                boxes=boxes,
+                labels=labels,
+                masks=masks,
+                depths=depths,
+                depth_map=depth_map,
+                use_geometry=use_geometry,
+                use_clip=use_clip,
+                clip_threshold=clip_threshold,
+                question_rel_terms=question_rel_terms,
+            )
+
+        if self._relations_cache is None or len(boxes) <= 1:
+            return _run()
+
+        key = self._generate_relations_cache_key(
+            image_pil, boxes, labels, depths, masks,
+            clip_threshold, use_geometry, use_clip, question_rel_terms,
+        )
+        cached = self._relations_cache.get(key)
+        if cached is not None:
+            self.logger.info("   Using cached relations")
+            return copy.deepcopy(cached)
+
+        rels = _run()
+        try:
+            self._relations_cache.put(key, copy.deepcopy(rels))
+        except Exception:
+            # Caching is best-effort; a failure to store must never abort a run.
+            pass
+        return rels
 
     # ----------------------------- Detection Execution -----------------------------
 
@@ -3945,7 +4147,7 @@ class ImageGraphPreprocessor:
             # Temporarily update inferencer config for this call
             self.relations_inferencer.relations_config = r_cfg
 
-            rels_rel = self.relations_inferencer.infer(
+            rels_rel = self._infer_relations_cached(
                 image_pil=image_pil,
                 boxes=boxes_rel,
                 labels=labels_rel,
