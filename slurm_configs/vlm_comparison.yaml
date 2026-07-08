@@ -11,7 +11,7 @@ backend: "vllm"
 n_runs: 3
 num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
-force_reprocess: false
+force_reprocess: true   # PREPROCESS-ONLY RUN: rebuild the stale images with the corrected overrides below
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
@@ -37,7 +37,7 @@ ablations:
 # ==========================================
 vlm_comparison:
   enabled: true
-  skip_preprocessing: false  # true = images already exist at {base_dir}/preprocessed_images/vlm_comparison/default/
+  skip_preprocessing: false  # PREPROCESS-ONLY RUN: regenerate the corrected images (was true; flip back after)
 
   # Add/remove Hugging Face repo IDs here to change which models are compared.
   # An entry may be a plain string (loaded in bf16) or a mapping carrying per-model
@@ -56,23 +56,45 @@ vlm_comparison:
   # the VLM loop), so each model gets the full 24GB card at gpu_memory_utilization=0.90.
   # FP8 is intentionally avoided on the RTX 3090 — Ampere has no hardware FP8, so vLLM
   # emulates it via Marlin, which needs layer dims divisible by 64 and fails here.
-  # PREPROCESSING-ONLY (2026-07-06): models emptied to disable VLM inference — this
-  # run just builds & caches the preprocessed images. Restore for real runs (bf16;
-  # see CLAUDE.md "Ablations end-to-end on faretra" for per-model status on the 3090):
+  # 2026-07-07: running InternVL alone on the 3090 (bf16). Its GoM prompts measure
+  # ~3464–4287 tokens, so the old max_model_len=2048 default truncated 9/15 examples
+  # (every one errored "decoder prompt ... longer than the maximum model length" and
+  # scored 0) → the stale 13.33% summary. At max_model_len=8192 every prompt fits with
+  # room to spare, well within its ~6.19GB KV. Restore the other models for a full run
+  # (see CLAUDE.md "Ablations end-to-end on faretra" for per-model status on the 3090):
   #   - "omkarthawakar/LlamaV-o1"          # DISABLED: mllama not servable by vllm 0.11.0 + transformers 4.57.6
-  #   - name: "Qwen/Qwen3-VL-8B-Instruct"  # ~16k-token GoM prompts: MUST cap vision tokens
-  #     max_pixels: 200704                 #   first guess — tune down until the prompt fits 8192
-  #     max_model_len: 8192
-  #   - name: "OpenGVLab/InternVL3_5-8B"   # the model that runs on the 3090 (~4k-token prompts, 6.19GB KV)
+  #   - name: "OpenGVLab/InternVL3_5-8B"   # WORKS on the 3090 (~4k-token prompts, 6.19GB KV) — mean_acc 52.20% (2026-07-07)
   #     max_model_len: 8192                #   fits all examples (2048 truncated 9/15)
   #   - name: "google/gemma-3-12b-it"      # DISABLED on 3090: too big in bf16, FP8 dead on Ampere
   #     fp8: true
+  # PREPROCESS-ONLY RUN: no models so no VLM is loaded — only the (corrected)
+  # preprocessed image set is generated. Restore the entry below for a real run.
   models: []
+  #  - name: "Qwen/Qwen2.5-VL-7B-Instruct"  # paper anchor model (Qwen2.5-VL-7B)
+  #    # max_pixels left uncapped => full-fidelity GoM image (prompts measured ~12.7k–17.1k tokens)
+  #    max_model_len: 24576               #   must exceed the largest prompt (~17.1k) + generation;
+  #                                       #   7B leaves ~6GB KV on the 3090, a single 24k-token seq needs ~1.3GB (fits)
 
   # Optional preprocessing parameter overrides applied on top of the pipeline
   # defaults (any field of gom.config.PreprocessorConfig). Leave empty ({})
   # to use the pipeline defaults unchanged.
-  preprocessing_overrides: {}
+  #
+  # Paper-matching render/prune settings — applied to vlm_comparison ONLY (the
+  # ablation grid in ablation_experiments.yaml is intentionally left on the code
+  # defaults). These only take effect when the preprocessed set is (re)generated:
+  # set skip_preprocessing: false and force_reprocess: true above to rebuild the
+  # existing images, which were rendered with the old (divergent) defaults.
+  #   * aggressive_pruning is the real fix — code default is False, but the paper
+  #     prunes to question-relevant objects; without it every detection (up to
+  #     max_detections_total=80) is marked, cluttering the image.
+  #   * auto_scale_styles / max_relations already match the current code defaults
+  #     (True / 10); pinned here so the paper run stays correct if defaults drift.
+  #   * max_relations_per_object is deliberately NOT set here (left at the code
+  #     default for now).
+  preprocessing_overrides:
+    aggressive_pruning: true
+    auto_scale_styles: true
+    max_relations: 10
 
 prompting:
   enabled: false

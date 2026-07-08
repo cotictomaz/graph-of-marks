@@ -741,6 +741,98 @@ shared FS), so `slurm-<id>.out` is only readable from the node it ran on — rea
 remote job's log via `srun --jobid=<id> --overlap tail .../slurm-<id>.out`, not
 from the submit host.
 
+## Paper-mismatch: preprocessing diverged from the upstream default (2026-07-08)
+
+Qwen2.5-VL VQA numbers didn't match the paper. Root cause: this fork's
+**preprocessing/rendering** diverged from the upstream default
+(`disi-unibo-nlp/graph-of-marks`), **not** the inference wiring. Diffing the two
+package trees (only `src/gom/ablations/` is fork-only; the rest is a shared
+lineage) showed the inference path already matches the paper — `run_vqa` runs in
+the equivalent of upstream's default **`visual_textual`** mode: the annotated
+image **plus** the textual scene-graph triples are sent, with the same
+spatial-reasoning system prompt (`vqa/runner.py` prepends `scene_graph_text` when
+`include_scene_graph=True`, which all three ablation runners pass). The
+divergences are all in how the marked image is produced:
+
+- **`aggressive_pruning` — the real regression.** Upstream's VQA driver *forces*
+  `aggressive_pruning=True` for every preprocess call (both the
+  `vqa/preproc.py::preprocess_for_qa` default **and** the `vqa/runner.py` call
+  site). This fork **commented those out** (in `ablations/utils.py::preprocess_for_qa`'s
+  `cfg_updates` block and at `vqa/runner.py:377-378`), so it falls back to the
+  config default `aggressive_pruning=False` (`preprocessor.py:427`). Effect:
+  without question-relevant pruning, **every** detection (up to
+  `max_detections_total=80`) is marked, so the VLM sees a far busier image than
+  the paper's clean, question-focused one. (Originated from the "Disable question
+  based filtering for ablations experiments" commit — intended for the *grid*
+  ablations, but it leaked into `vlm_comparison` / `prompting` too.) Note
+  `apply_question_filter` stays effectively `True` in both; only the
+  distance-based aggressive pruning changed.
+- **`sam_version`** default `"1"` (SAM v1) upstream → `"hq"` (SAM-HQ / `vit_h`)
+  here (`preprocessor.py`), so the drawn masks differ.
+- **`viz/visualizer.py VisualizerConfig`**: `max_relations_per_object` 1→3,
+  `auto_scale_styles` `True`→`False` **in the RenderConfig default** — but
+  `preprocessor.py` (`auto_scale_styles=True`, passed through to the visualizer)
+  overrides that at runtime, so the effective value is ≈`True` in current code;
+  the 2026-07-06 `ImagePreprocessing1.log` showing `False` / `max_relations_per_object=3`
+  simply predates those code changes (the log is **not** authoritative for
+  current defaults — read the dataclasses).
+- **Not relevant to these VQA runs** (ruled out): depth model `vitl`→`vits`
+  (`utils/depth.py`; depth is skipped, `enable_spatial_3d=False`), and
+  `api.py`'s `sam_hq_model_type` `vit_h`→`vit_b` (only the `GoM` API path; the
+  ablations use the config path, still `vit_h`).
+- **Live-but-latent bug:** `config.py:157 detectors_to_use = ("yolov8")` is a
+  **string, not a tuple** (would iterate per-character). It only lives in the
+  *fallback* `PreprocessorConfig` (used if the `from gom.pipeline.preprocessor
+  import PreprocessorConfig` at `config.py:97` fails); the authoritative
+  `preprocessor.py:448` still lists all three detectors. Worth fixing to
+  `("yolov8",)` so a fallback import can't silently gut detection.
+
+### Which config is authoritative
+
+`gom.config.default_config()` returns
+`gom.pipeline.preprocessor.PreprocessorConfig` — `config.py` imports it and only
+falls back to its own lightweight class on `ImportError`. So the **real**
+defaults live in `preprocessor.py`, not in the `config.py` dataclass (they drift:
+e.g. `config.py` says `sam_version="1"`, `preprocessor.py` says `"hq"` — the run
+uses `"hq"`).
+
+### The fix — per-experiment `preprocessing_overrides` (vlm_comparison + prompting only)
+
+`main.py` reads a `preprocessing_overrides:` map per experiment type and forwards
+it as `cfg_overrides` into `generate_default_dataset` → `run_preprocessing` →
+`preprocess_for_qa` → `update_cfg_correct` (applied to `cfg` and propagated to the
+`visualizer` / `relations_inferencer` sub-configs). Added to
+`slurm_configs/vlm_comparison.yaml` and `slurm_configs/prompting_experiments.yaml`
+**only**:
+
+```yaml
+preprocessing_overrides:
+  aggressive_pruning: true   # the real fix (code default is False)
+  auto_scale_styles: true    # already ≈True in current code; pinned for drift-safety
+  max_relations: 10          # already the default (RelationsConfig/preprocessor); pinned
+```
+
+`ablation_experiments.yaml` is intentionally **untouched** — the grid path
+(`generate_ablated_dataset`) takes **no** `preprocessing_overrides`, so the
+ablation grid keeps the code defaults. `max_relations_per_object` was
+deliberately **not** changed (still `5` in `preprocessor.py` vs the paper's `1` —
+open item). Overrides only take effect on **regeneration**: set
+`skip_preprocessing: false` + `force_reprocess: true` to rebuild the stale images
+(inference otherwise reads them from disk). The vlm_comparison and prompting
+preprocessing outputs are **content-identical** (same dataset/subsample, same
+overrides, deterministic pipeline) but land in different `{base_dir}` trees, so
+one can be generated once and **symlinked** into the other's
+`preprocessed_images/<exp>/default/` to avoid preprocessing twice.
+
+### Preprocess-only run pattern
+
+To (re)generate the corrected image set without loading a VLM, set `models: []`
+(no model → no vLLM load) with `skip_preprocessing: false` + `force_reprocess:
+true`; `main.py` runs the preprocessing phase then the inference runner as a
+0-model no-op. Used 2026-07-08 to rebuild `vlm_comparison`'s images with the
+pruning fix before the real comparison run. Remember to flip
+`skip_preprocessing`/`force_reprocess`/`models` back afterward.
+
 ## Legacy / Reference Files
 
 - `src/all_in_one_gom.py` — monolithic prototype; not part of the packaged API
