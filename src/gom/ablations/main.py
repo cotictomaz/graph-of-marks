@@ -275,13 +275,11 @@ def apply_experiment_config(preproc_obj, exp_name: str):
 
     final_updates = {**base_cfg_updates, **config_changes}
 
-    # Grid ablations preprocess WITHOUT question-guided filtering so the swept
-    # hyperparameter is the only thing varying across grid points (question
-    # filtering would otherwise change which objects/relations survive per
-    # image and confound the ablation). vlm_comparison / prompting are the only
-    # callers that pass these literal names, and they keep filtering on.
-    if exp_name not in ("vlm_comparison", "prompting"):
-        final_updates["apply_question_filter"] = False
+    # Grid ablations keep question-guided filtering ON (apply_question_filter is
+    # True in base_cfg_updates above), matching vlm_comparison / prompting and
+    # the upstream repo default. This trims the marked set to question-relevant
+    # objects so the images aren't overcrowded; the swept hyperparameter is still
+    # the only *config* knob varying across grid points.
 
     return update_cfg_correct(final_updates, preproc_obj)
 
@@ -322,6 +320,11 @@ def main():
     ablations_run_vlm        = ablations_cfg.get("run_vlm", True)
     ablations_models         = ablations_cfg.get("models", [])
     experiments              = ablations_cfg.get("experiments", {})
+    # Static preprocessing overrides applied to EVERY grid point on top of the
+    # per-experiment baseline (mirrors vlm_comparison / prompting). Intended for
+    # cross-cutting knobs like aggressive_pruning / auto_scale_styles that should
+    # stay constant across the swept grid; the grid params still win on collision.
+    ablations_overrides      = ablations_cfg.get("preprocessing_overrides", {}) or {}
 
     # --- VLM comparison section ---
     vlm_comparison_cfg          = cfg.get("vlm_comparison", {})
@@ -329,6 +332,15 @@ def main():
     vlm_comparison_skip_preproc = vlm_comparison_cfg.get("skip_preprocessing", False)
     vlm_comparison_models       = vlm_comparison_cfg.get("models", [])
     vlm_preprocessing_overrides = vlm_comparison_cfg.get("preprocessing_overrides", {}) or {}
+    # Which image the VLM sees, and whether the scene-graph triples are prepended
+    # to the prompt. The defaults reproduce the GoM setup (annotated render + graph
+    # text); "raw" + include_scene_graph: false is the no-GoM baseline, and
+    # "raw" + true is the textual-only ablation. See run_vlm_comparison.
+    # NB: a run with non-default values needs its OWN base_dir — run_vqa resumes
+    # from an existing raw_results.json and would otherwise reuse the previous
+    # run's answers (see slurm_configs/vlm_comparison_raw.yaml).
+    vlm_inference_image         = vlm_comparison_cfg.get("inference_image", "preprocessed")
+    vlm_include_scene_graph     = vlm_comparison_cfg.get("include_scene_graph", True)
 
     # --- Prompting section ---
     prompting_cfg           = cfg.get("prompting", {})
@@ -350,6 +362,14 @@ def main():
     # the model emits the "Answer:" line itself.
     system_prompt     = "You are a multimodal assistant capable of understanding both visual and textual scene graphs. Use the image and the accompanying graph description to answer the question accurately."
     multimodal_prompt = "Answer the question based on the spatial configuration in the image and the graph description. Conclude with your final answer on a new line in the form:\nAnswer: <one word or a short phrase>\n\nQuestion: {question}"
+
+    # Baseline variants, used only when a run sends no scene graph (see
+    # include_scene_graph above). The shared prompts tell the model to use "the
+    # graph description", which does not exist in that run — a control condition
+    # must not instruct the model to consult something absent. Same "Answer:"
+    # contract, so ablations/evaluation.py extracts and scores them identically.
+    baseline_system_prompt     = "You are a multimodal assistant. Use the image to answer the question accurately."
+    baseline_multimodal_prompt = "Answer the question based on the image. Conclude with your final answer on a new line in the form:\nAnswer: <one word or a short phrase>\n\nQuestion: {question}"
 
     # Record the global run settings and which experiment types are enabled.
     log_section("GLOBAL RUN SETTINGS")
@@ -445,6 +465,7 @@ def main():
             "run_vlm": ablations_run_vlm,
             "experiments": list(experiments.keys()),
         })
+        log_key_values("Preprocessing overrides", ablations_overrides)
 
         if not ablations_skip_preproc:
             print("\n" + "═"*50)
@@ -469,6 +490,7 @@ def main():
                     ablation_grid=ablation_grid,
                     examples=dataset_examples,
                     preproc_obj=preprocessor,
+                    preprocessing_overrides=ablations_overrides,
                     base_dir=base_dir,
                     force_reprocess=force_reprocess
                 )
@@ -517,6 +539,8 @@ def main():
         log_models(vlm_comparison_models, backend)
         log_key_values("VLM comparison settings", {
             "skip_preprocessing": vlm_comparison_skip_preproc,
+            "inference_image": vlm_inference_image,
+            "include_scene_graph": vlm_include_scene_graph,
         })
         log_key_values("Preprocessing overrides", vlm_preprocessing_overrides)
 
@@ -547,11 +571,14 @@ def main():
             experiment_name="vlm_comparison",
             models_list=vlm_comparison_models,
             examples=dataset_examples,
-            multimodal_prompt=multimodal_prompt,
-            system_prompt=system_prompt,
+            # A run that sends no scene graph must not be told to use one.
+            multimodal_prompt=multimodal_prompt if vlm_include_scene_graph else baseline_multimodal_prompt,
+            system_prompt=system_prompt if vlm_include_scene_graph else baseline_system_prompt,
             n_runs=n_runs,
             base_dir=base_dir,
             backend=backend,
+            inference_image=vlm_inference_image,
+            include_scene_graph=vlm_include_scene_graph,
         )
 
     # ==========================================

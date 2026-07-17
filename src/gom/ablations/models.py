@@ -57,12 +57,47 @@ class ModelSpec:
       ``max_model_len``.
     * ``max_tokens`` — generation cap override (else auto by reasoning-model
       detection).
+    * ``gpu_memory_utilization`` — vLLM total-budget cap for *this* model. Raise
+      toward ~0.96 to buy back KV headroom for a model that only *just* fits
+      (e.g. Qwen3-VL-8B at 16k context — see CLAUDE.md); ``None`` keeps the
+      ``VllmVLM`` default (0.90).
+    * ``max_num_batched_tokens`` — startup-profiling / prefill-chunk token cap.
+      Lowering it (e.g. 4096) shrinks the profiling activation peak that OOMs a
+      near-full card; must still be ≥ one image's vision-token count.
+    * ``limit_mm_per_prompt`` — per-modality multimodal cap forwarded verbatim to
+      vLLM. For single-image VQA on Qwen3-VL, ``{"image": 1, "video": 0}`` is the
+      load-bearing knob: it stops vLLM profiling the vision encoder with a *video*
+      item at max feature size (a ~151k-token budget that otherwise fills the
+      card). ``None`` keeps the ``VllmVLM`` default (``{"image": 1}``).
     """
     name: str
     quantize_fp8: bool = False
     max_model_len: Optional[int] = None
     max_pixels: Optional[int] = None
     max_tokens: Optional[int] = None
+    gpu_memory_utilization: Optional[float] = None
+    max_num_batched_tokens: Optional[int] = None
+    limit_mm_per_prompt: Optional[Dict[str, int]] = None
+
+    def vllm_overrides(self) -> Dict[str, Any]:
+        """The per-model ``VllmVLM`` kwargs this spec sets (only the non-default
+        ones), ready to splat over the base kwargs. Keeps the three runners'
+        model-construction identical and in one place — add a new per-model knob
+        here and every experiment type picks it up."""
+        kw: Dict[str, Any] = {}
+        if self.max_model_len is not None:
+            kw["max_model_len"] = self.max_model_len
+        if self.max_pixels is not None:
+            kw["max_pixels"] = self.max_pixels
+        if self.max_tokens is not None:
+            kw["max_tokens"] = self.max_tokens
+        if self.gpu_memory_utilization is not None:
+            kw["gpu_memory_utilization"] = self.gpu_memory_utilization
+        if self.max_num_batched_tokens is not None:
+            kw["max_num_batched_tokens"] = self.max_num_batched_tokens
+        if self.limit_mm_per_prompt is not None:
+            kw["limit_mm_per_prompt"] = self.limit_mm_per_prompt
+        return kw
 
 
 def parse_model_entry(entry: Union[str, Dict[str, Any]]) -> ModelSpec:
@@ -92,6 +127,9 @@ def parse_model_entry(entry: Union[str, Dict[str, Any]]) -> ModelSpec:
             max_model_len=entry.get("max_model_len"),
             max_pixels=entry.get("max_pixels"),
             max_tokens=entry.get("max_tokens"),
+            gpu_memory_utilization=entry.get("gpu_memory_utilization"),
+            max_num_batched_tokens=entry.get("max_num_batched_tokens"),
+            limit_mm_per_prompt=entry.get("limit_mm_per_prompt"),
         )
     raise ValueError(
         f"Unsupported model entry {entry!r}: expected a string or a mapping with a 'name' key."

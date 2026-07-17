@@ -147,33 +147,44 @@ def generate_ablated_dataset(
     ablation_grid: Dict[str, List[Any]],
     examples: List[Any],
     preproc_obj: Optional[Any] = None,
+    preprocessing_overrides: Optional[Dict[str, Any]] = None,
     base_dir: str = "ablation_studies",
-    force_reprocess: bool = False 
+    force_reprocess: bool = False
 ) -> None:
     """
     Generates preprocessed datasets for a specific ablation study.
 
     Parameters:
-        experiment_name (str): 
+        experiment_name (str):
             Name of the experiment (e.g., 'ablate_edge_thickness').
-        ablation_grid (Dict[str, List[Any]]): 
+        ablation_grid (Dict[str, List[Any]]):
             A dictionary mapping configuration parameters to lists of values to test.
-            If multiple keys are provided (e.g., parameters that must be ablated together), 
+            If multiple keys are provided (e.g., parameters that must be ablated together),
             their value lists must have the exact same length and will be iterated in parallel.
-        examples (List[VQAExample]): 
+        examples (List[VQAExample]):
             The dataset examples to process.
-        preproc_obj (Optional[Preprocessor]): 
+        preproc_obj (Optional[Preprocessor]):
             An optionally pre-initialized preprocessor object to avoid reloading models.
-        base_dir (str): 
+        preprocessing_overrides (Optional[Dict[str, Any]]):
+            Static config overrides (any PreprocessorConfig field, e.g.
+            aggressive_pruning / auto_scale_styles) applied to EVERY grid point on
+            top of the baseline set by apply_experiment_config. Mirrors the
+            preprocessing_overrides used by generate_default_dataset for
+            vlm_comparison / prompting. The swept ablation_grid params take
+            precedence on any key collision, and — unlike the grid params — these
+            overrides are NOT encoded in the output folder name (they are constant
+            across grid points, so the folder stays named by what actually varies).
+        base_dir (str):
             Base directory for saving all outputs.
 
     Description:
-        The function loops over the provided ablation values in parallel, dynamically updates 
-        the preprocessor configuration, and delegates the execution to `run_preprocessing`. 
+        The function loops over the provided ablation values in parallel, dynamically updates
+        the preprocessor configuration, and delegates the execution to `run_preprocessing`.
         Artifacts are saved strictly in:
         {base_dir}/preprocessed_images/{experiment_name}/{param1_value1_param2_value2}/
     """
     logger = get_logger()
+    static_overrides = preprocessing_overrides or {}
     keys = list(ablation_grid.keys())
     value_lists = list(ablation_grid.values())
 
@@ -183,23 +194,29 @@ def generate_ablated_dataset(
 
     print(f"🚀 Avvio Generazione Dataset: {experiment_name} (force_reprocess={force_reprocess})")
     logger.info(
-        "[preprocessing:%s] started — %d grid point(s), %d examples, %d unique images, force_reprocess=%s",
+        "[preprocessing:%s] started — %d grid point(s), %d examples, %d unique images, overrides=%s, force_reprocess=%s",
         experiment_name, lengths[0] if lengths else 0, len(examples),
-        _count_unique_images(examples), force_reprocess,
+        _count_unique_images(examples), static_overrides, force_reprocess,
     )
 
     for values_tuple in zip(*value_lists):
-        current_overrides = dict(zip(keys, values_tuple))
-        
+        grid_overrides = dict(zip(keys, values_tuple))
+        # Static overrides apply to every grid point; the swept grid params win on
+        # any key collision so the ablated hyperparameter is never masked.
+        current_overrides = {**static_overrides, **grid_overrides}
+
+        # Folder naming uses ONLY the grid params: the static overrides are constant
+        # across every grid point, so encoding them would just churn path names and
+        # break resumption of already-preprocessed sets.
         folder_parts = []
-        for k, v in current_overrides.items():
+        for k, v in grid_overrides.items():
             safe_v = str(v).replace(" ", "").replace("[", "").replace("]", "").replace(",", "_")
             folder_parts.append(f"{k}_{safe_v}")
-            
+
         folder_suffix = "_".join(folder_parts)
         out_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, folder_suffix)
 
-        logger.info("[preprocessing:%s] grid point %s → %s", experiment_name, current_overrides, folder_suffix)
+        logger.info("[preprocessing:%s] grid point %s (overrides=%s) → %s", experiment_name, grid_overrides, static_overrides, folder_suffix)
 
         os.makedirs(out_dir, exist_ok=True)
 
@@ -226,7 +243,8 @@ def generate_ablated_dataset(
                 logger.info("[preprocessing:%s] RESUME — %d/%d done, %d remaining: %s",
                             experiment_name, n_done, len(examples), n_missing, folder_suffix)
 
-        print(f"\n  ↳ 🔧 Processamento configurazione: {current_overrides}")
+        print(f"\n  ↳ 🔧 Processamento configurazione: {grid_overrides}"
+              f"{f' (+ overrides {static_overrides})' if static_overrides else ''}")
         print(f"  ↳ 💾 Salvataggio in: {out_dir}")
 
         run_preprocessing(

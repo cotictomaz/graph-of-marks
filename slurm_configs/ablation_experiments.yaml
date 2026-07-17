@@ -15,7 +15,7 @@ base_dir: "/workspace/ablation_studies/ablations"
 backend: "vllm"       # cluster nodes have no Ollama server running; use vllm
 n_runs: 3
 num_images: 100       # how many unique images to keep; -1 = all images
-questions_per_image: -1  # how many questions to keep per image; -1 = all questions
+questions_per_image: 1  # how many questions to keep per image; -1 = all questions
 
 # Set to true only when the ablation_grid or preprocessing pipeline changed
 # since the last run; it overwrites the existing preprocessed images.
@@ -53,6 +53,23 @@ ablations:
     - "omkarthawakar/LlamaV-o1"          # anchor: reproduce the paper's ablation trends
     - "Qwen/Qwen3-VL-4B-Instruct"        # \ same family, two sizes → is drawn-mark sensitivity
     - "Qwen/Qwen3-VL-8B-Instruct"        # / scale-dependent? (both bf16-safe → keeps the big grid cheap)
+
+  # Static preprocessing overrides applied to EVERY grid point on top of the
+  # per-experiment baseline (same mechanism as vlm_comparison / prompting). Use
+  # this for cross-cutting render/prune knobs that must stay CONSTANT across the
+  # swept grid — the ablated grid params still win on any key collision, and these
+  # overrides are NOT encoded in the output folder names (they don't vary).
+  #   * aggressive_pruning — code default is False; the paper prunes to
+  #     question-relevant objects. Set True to match the paper's clean images.
+  #   * auto_scale_styles — scales mark/line sizes to the image; pinned here so the
+  #     grid stays consistent with vlm_comparison / prompting.
+  # NOTE: like the other two experiment types, these only take effect when the
+  # preprocessed set is (re)generated — set force_reprocess: true (above) to
+  # rebuild images that were rendered with different values. Leave empty ({}) to
+  # keep the pipeline code defaults unchanged.
+  preprocessing_overrides:
+    aggressive_pruning: true
+    auto_scale_styles: false
 
   # Add, remove, or edit entries here to change which ablations run and over
   # which values. Each key under `experiments` must match a branch handled

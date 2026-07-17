@@ -1,0 +1,73 @@
+# Config for `train.sh slurm_configs/vlm_comparison_raw.yaml` (see gom.ablations.main).
+#
+# The NO-GoM BASELINE: runs the VLM on the untouched source images, with no
+# annotated render and no scene-graph text. This is the control condition for
+# vlm_comparison.yaml — same dataset, same subsample, same models, same scorer;
+# the ONLY difference is that the model sees a plain COCO image and a plain VQA
+# prompt. Nothing is preprocessed, so no GoM artifacts are read or written.
+#
+# ⚠️ This MUST keep its own base_dir (below). run_vqa resumes from an existing
+# raw_results.json — pointed at vlm_comparison's results tree it would load the
+# preprocessed run's answers, skip every example, and report those numbers as
+# the baseline.
+
+# ==========================================
+# Global settings
+# ==========================================
+base_dir: "/workspace/ablation_studies/vlm_comparison_raw"
+backend: "vllm"
+n_runs: 3
+num_images: 100       # keep in sync with vlm_comparison.yaml so the two are comparable
+questions_per_image: -1
+force_reprocess: false  # unused here: nothing is preprocessed
+
+# Single flat VQAv1 JSON (list of {image_path, question, answers}).
+dataset_path: "/workspace/vqav1_limited_1000.json"
+
+# --- Image location (see README_SLURM.md §2.1 "Images live only on node 40") ---
+# Identical to vlm_comparison.yaml, EXCEPT image_cache_dir: it points at the
+# existing vlm_comparison cache so a run on a non-faretra node reuses the already
+# downloaded images instead of fetching all 100 again into a fresh base_dir.
+images_dir: "/images"
+images_base_url: "http://137.204.107.40:8000"
+image_cache_dir: "/workspace/ablation_studies/vlm_comparison/image_cache"
+
+ablations:
+  enabled: false
+
+# ==========================================
+# VLM comparison experiment — raw-image baseline
+# ==========================================
+vlm_comparison:
+  enabled: true
+
+  # No preprocessing phase: nothing here reads a GoM render, so main.py never
+  # builds the ~6GB preprocessor and the VLM gets the whole card immediately.
+  # (Leaving this false would burn ~100-135s/image producing images this run
+  # then ignores.)
+  skip_preprocessing: true
+
+  # The two baseline knobs (see gom.ablations.run_experiments.run_vlm_comparison):
+  #   inference_image:     "preprocessed" (the GoM render) | "raw" (the source image)
+  #   include_scene_graph: whether the scene-graph triples are prepended to the prompt
+  # Both off ⇒ the no-GoM control. Setting include_scene_graph: true here instead
+  # gives the textual-only ablation (raw image + triples), which still requires a
+  # preprocessed set to exist for the triples.
+  # When include_scene_graph is false, main.py also swaps in a baseline prompt
+  # pair that does not mention a "graph description".
+  inference_image: "raw"
+  include_scene_graph: false
+
+  # Raw COCO images are ~640x480 ⇒ only ~400 vision tokens, versus the 12.7k-17.1k
+  # of a GoM render. So none of vlm_comparison.yaml's 24GB-card acrobatics apply
+  # (no config D, no max_pixels cap, no raised gpu_memory_utilization): a 4096
+  # context is generous and leaves a large KV pool at the default util of 0.90.
+  models:
+    - name: "Qwen/Qwen2.5-VL-7B-Instruct"   # paper anchor (Qwen2.5-VL-7B)
+      max_model_len: 4096
+
+  # No preprocessing_overrides: they only affect image generation, and this run
+  # generates no images.
+
+prompting:
+  enabled: false

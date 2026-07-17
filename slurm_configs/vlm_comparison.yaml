@@ -11,7 +11,7 @@ backend: "vllm"
 n_runs: 3
 num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
-force_reprocess: true   # PREPROCESS-ONLY RUN: rebuild the stale images with the corrected overrides below
+force_reprocess: false  # use the already-generated preprocessed images (no preprocessing step)
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
@@ -37,43 +37,70 @@ ablations:
 # ==========================================
 vlm_comparison:
   enabled: true
-  skip_preprocessing: false  # PREPROCESS-ONLY RUN: regenerate the corrected images (was true; flip back after)
+  skip_preprocessing: true  
 
   # Add/remove Hugging Face repo IDs here to change which models are compared.
   # An entry may be a plain string (loaded in bf16) or a mapping carrying per-model
   # load overrides (see gom.ablations.models.parse_model_entry / ModelSpec):
   #     - name: "repo/id"
-  #       fp8: false            # FP8-quantize on load (dead on the RTX 3090; use bf16)
-  #       max_model_len: 8192   # context cap = KV size + HARD prompt-length ceiling;
-  #                             #   size to the model's MEASURED max GoM-prompt length
-  #                             #   (default 8192). Too small => "decoder prompt ...
-  #                             #   longer than the maximum model length" on every request.
-  #       max_pixels: 200704    # Qwen-style vision-token cap: shrinks the image's token
-  #                             #   count so an oversized prompt fits max_model_len WITHOUT
-  #                             #   spending KV. The real lever for Qwen3-VL's ~16k prompts.
-  #       max_tokens: 512       # generation cap override (else auto by reasoning-model type)
+  #       fp8: false                 # FP8-quantize on load (dead on the RTX 3090; use bf16)
+  #       max_model_len: 8192        # context cap = KV size + HARD prompt-length ceiling;
+  #                                  #   size to the model's MEASURED max GoM-prompt length.
+  #                                  #   Too small => "decoder prompt ... longer than the
+  #                                  #   maximum model length" on every request.
+  #       max_pixels: 200704         # Qwen-style vision-token cap: shrinks the image's token
+  #                                  #   count so a prompt fits max_model_len.
+  #       max_tokens: 512            # generation cap override (else auto by reasoning-model type)
+  #       gpu_memory_utilization: 0.96   # total-budget cap; raise toward 0.96 to buy KV for a
+  #                                  #   model that only *just* fits (default 0.90)
+  #       max_num_batched_tokens: 4096   # profiling/prefill-chunk cap; lower it to shrink the
+  #                                  #   startup activation peak (must stay >= one image's tokens)
+  #       limit_mm_per_prompt: {image: 1, video: 0}   # per-modality multimodal cap. video:0 is
+  #                                  #   load-bearing for Qwen3-VL — see "config D" below.
   # main.py releases the GoM preprocessor's GPU memory after preprocessing (before
   # the VLM loop), so each model gets the full 24GB card at gpu_memory_utilization=0.90.
-  # FP8 is intentionally avoided on the RTX 3090 — Ampere has no hardware FP8, so vLLM
-  # emulates it via Marlin, which needs layer dims divisible by 64 and fails here.
-  # 2026-07-07: running InternVL alone on the 3090 (bf16). Its GoM prompts measure
-  # ~3464–4287 tokens, so the old max_model_len=2048 default truncated 9/15 examples
-  # (every one errored "decoder prompt ... longer than the maximum model length" and
-  # scored 0) → the stale 13.33% summary. At max_model_len=8192 every prompt fits with
-  # room to spare, well within its ~6.19GB KV. Restore the other models for a full run
-  # (see CLAUDE.md "Ablations end-to-end on faretra" for per-model status on the 3090):
-  #   - "omkarthawakar/LlamaV-o1"          # DISABLED: mllama not servable by vllm 0.11.0 + transformers 4.57.6
-  #   - name: "OpenGVLab/InternVL3_5-8B"   # WORKS on the 3090 (~4k-token prompts, 6.19GB KV) — mean_acc 52.20% (2026-07-07)
-  #     max_model_len: 8192                #   fits all examples (2048 truncated 9/15)
-  #   - name: "google/gemma-3-12b-it"      # DISABLED on 3090: too big in bf16, FP8 dead on Ampere
-  #     fp8: true
-  # PREPROCESS-ONLY RUN: no models so no VLM is loaded — only the (corrected)
-  # preprocessed image set is generated. Restore the entry below for a real run.
-  models: []
-  #  - name: "Qwen/Qwen2.5-VL-7B-Instruct"  # paper anchor model (Qwen2.5-VL-7B)
-  #    # max_pixels left uncapped => full-fidelity GoM image (prompts measured ~12.7k–17.1k tokens)
-  #    max_model_len: 24576               #   must exceed the largest prompt (~17.1k) + generation;
-  #                                       #   7B leaves ~6GB KV on the 3090, a single 24k-token seq needs ~1.3GB (fits)
+  #
+  # Per-model status on the RTX 3090 (measured 2026-07-14 — see CLAUDE.md
+  # "Qwen3-VL VRAM fit on the 3090" for the full lever analysis):
+  #   * Qwen2.5-VL-7B  — WORKS (paper anchor; full-fidelity prompts ~12.7k–17.1k tok).
+  #   * InternVL3.5-8B — WORKS (bf16, ~4k-tok prompts, leaves a ~33k-token KV cache).
+  #   * Qwen3-VL-8B-Instruct — WORKS only as "config D" below: all THREE of
+  #     limit_mm(video:0) + max_num_batched_tokens=4096 + gpu_memory_utilization=0.96
+  #     are REQUIRED together (none alone loads). The dominant blocker is vLLM
+  #     profiling the vision encoder with a *video* item at max feature size (a
+  #     ~151k-token budget); limit_mm video:0 kills that. Thin headroom (~0.28GB
+  #     free after inference) — drop max_model_len to ~12288 for more KV slack.
+  #   * LlamaV-o1 (mllama) — DISABLED: not servable by vllm 0.11.0 + transformers 4.57.6.
+  #   * gemma-3-12b-it   — DISABLED on 3090: OOMs at ~22.8GB just LOADING weights in
+  #     bf16 (run it on the 5090). FP8 is dead on Ampere (Marlin needs dims /64;
+  #     Qwen3-VL's 4304 fails).
+  models:
+  # 2026-07-14: this run is Qwen3-VL ONLY (vllm inference side, skip_preprocessing:
+  # true → reads existing preprocessed images). Uncomment the anchors for the full
+  # comparison.
+  # - name: "Qwen/Qwen2.5-VL-7B-Instruct"   # paper anchor (Qwen2.5-VL-7B)
+  #   max_model_len: 24576                  #   must exceed the largest prompt (~17.1k) + generation
+  # - name: "OpenGVLab/InternVL3_5-8B"      # bf16; ~4k-token prompts, ~33k-token KV — comfortable
+  #   max_model_len: 8192
+
+    # Qwen3-VL-8B-Instruct — "config D" (the ONLY config that fits 16384 ctx on a
+    # 24GB 3090). All three knobs are required together; see the per-model notes above.
+    - name: "Qwen/Qwen3-VL-8B-Instruct"
+      max_model_len: 17000        # 2026-07-14: raised 16384->17000 to clear the busiest
+                                  #   GoM prompts (observed up to 16969 tok; ~30% overflowed
+                                  #   16384 and scored 0). NB the KV pool is memory-bound, so
+                                  #   17000 also needs a higher util (below) or load fails with
+                                  #   "estimated max model length 16560".
+      max_pixels: 200704          #   NB: this does NOT effectively cap Qwen3-VL's vision tokens
+                                  #   here — the ~16k prompt is ~15k VISION tokens (scene-graph
+                                  #   text is tiny). Cutting vision tokens is the real fix if this
+                                  #   still overflows / hangs (razor-thin ~0.1GB free at 17000).
+      gpu_memory_utilization: 0.97  # 0.96 gave only 16,560-token KV (< 17000); 0.97 ≈ 17.8k-token
+                                  #   pool so a single 17000-token request fits. Thinner headroom.
+      max_num_batched_tokens: 4096
+      limit_mm_per_prompt: {image: 1, video: 0}
+  #   - name: "omkarthawakar/LlamaV-o1"     # DISABLED: mllama unservable (vllm 0.11.0 + transformers 4.57.6)
+  #   - name: "google/gemma-3-12b-it"       # DISABLED on 3090: OOMs loading bf16 weights; run on the 5090
 
   # Optional preprocessing parameter overrides applied on top of the pipeline
   # defaults (any field of gom.config.PreprocessorConfig). Leave empty ({})

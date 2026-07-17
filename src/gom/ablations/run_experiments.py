@@ -62,12 +62,10 @@ def run_ablation_experiments(
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
             vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
-            if spec.max_model_len is not None:
-                vllm_kwargs["max_model_len"] = spec.max_model_len
-            if spec.max_pixels is not None:
-                vllm_kwargs["max_pixels"] = spec.max_pixels
-            if spec.max_tokens is not None:
-                vllm_kwargs["max_tokens"] = spec.max_tokens
+            # Per-model load overrides (max_model_len / max_pixels / max_tokens /
+            # gpu_memory_utilization / max_num_batched_tokens / limit_mm_per_prompt)
+            # from the config entry — see gom.ablations.models.ModelSpec.
+            vllm_kwargs.update(spec.vllm_overrides())
             current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:
@@ -200,30 +198,65 @@ def run_vlm_comparison(
     n_runs: int = 3,
     base_dir: str = "ablation_studies",
     backend: str = "ollama",
+    inference_image: str = "preprocessed",
+    include_scene_graph: bool = True,
 ) -> None:
     """
-    Runs each VLM model against a single set of preprocessed images (the 'default' config)
-    and records per-run and aggregate metrics.
+    Runs each VLM model against a single set of images and records per-run and
+    aggregate metrics.
 
-    The preprocessed images must already exist at:
-        {base_dir}/preprocessed_images/{experiment_name}/default/
+    Parameters:
+        inference_image:
+            Which image the VLM actually sees. "preprocessed" (default) sends the
+            annotated GoM render; "raw" sends the untouched source image
+            (``VQAExample.image_path``, already resolved to a local absolute path
+            by ``main.build_vqa_examples``) — the no-GoM baseline.
+        include_scene_graph:
+            Whether to prepend the scene-graph triples to the prompt. The triples
+            are read from the preprocessed folder, so this is independent of
+            ``inference_image``: "raw" + True is the textual-only ablation,
+            "raw" + False is the plain-VQA baseline.
+
+    The preprocessed images must already exist at
+    ``{base_dir}/preprocessed_images/{experiment_name}/default/`` for every mode
+    except the raw + no-graph baseline, which reads nothing from that folder.
 
     Results are saved as:
         {base_dir}/results/{experiment_name}/{model_name}/run_N/raw_results.json
         {base_dir}/results/{experiment_name}/{model_name}/summary_metrics.json
+
+    NOTE: ``run_vqa`` resumes from an existing ``raw_results.json`` (it skips any
+    (image, question) pair already recorded there), so a run with different
+    inference settings MUST use its own ``base_dir`` — otherwise it silently
+    reuses the previous run's answers instead of generating new ones.
     """
     logger = get_logger()
     preproc_dir = os.path.join(base_dir, "preprocessed_images", experiment_name, "default")
 
+    # Fail loudly on a typo: run_vqa treats *any* value other than the literal
+    # "preprocessed" as raw, so a misspelling would silently run the wrong
+    # experiment and report plausible-looking numbers.
+    if inference_image not in ("preprocessed", "raw"):
+        raise ValueError(
+            f"inference_image must be 'preprocessed' or 'raw', got {inference_image!r}."
+        )
+
     print("\n" + "="*70)
     print(f"🚀 AVVIO INFERENZA VLM COMPARISON: {experiment_name}")
     print("="*70)
+    print(f"  🖼️  inference_image={inference_image} | include_scene_graph={include_scene_graph}")
     logger.info(
-        "[inference:%s] VLM comparison started — %d model(s), backend=%s, n_runs=%d, %d examples",
+        "[inference:%s] VLM comparison started — %d model(s), backend=%s, n_runs=%d, %d examples, "
+        "inference_image=%s, include_scene_graph=%s",
         experiment_name, len(models_list), backend, n_runs, len(examples),
+        inference_image, include_scene_graph,
     )
 
-    if not os.path.exists(preproc_dir):
+    # The preprocessed folder is only required when something actually reads from
+    # it: the annotated image and/or the scene-graph triples. The raw + no-graph
+    # baseline needs no GoM artifacts at all.
+    needs_preproc_dir = (inference_image == "preprocessed") or include_scene_graph
+    if needs_preproc_dir and not os.path.exists(preproc_dir):
         print(f"  [❌ Error] Preprocessed images not found at: {preproc_dir}")
         print("  Run with skip_preprocessing: false first, or check your base_dir setting.")
         logger.error("[inference:%s] preprocessed images not found at %s — aborting.", experiment_name, preproc_dir)
@@ -236,12 +269,10 @@ def run_vlm_comparison(
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
             vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
-            if spec.max_model_len is not None:
-                vllm_kwargs["max_model_len"] = spec.max_model_len
-            if spec.max_pixels is not None:
-                vllm_kwargs["max_pixels"] = spec.max_pixels
-            if spec.max_tokens is not None:
-                vllm_kwargs["max_tokens"] = spec.max_tokens
+            # Per-model load overrides (max_model_len / max_pixels / max_tokens /
+            # gpu_memory_utilization / max_num_batched_tokens / limit_mm_per_prompt)
+            # from the config entry — see gom.ablations.models.ModelSpec.
+            vllm_kwargs.update(spec.vllm_overrides())
             current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:
@@ -270,8 +301,12 @@ def run_vlm_comparison(
                 prompt_tpl=multimodal_prompt,
                 batch_size=1,
                 preproc_folder=preproc_dir,
-                include_scene_graph=True,
-                inference_image="preprocessed",
+                include_scene_graph=include_scene_graph,
+                inference_image=inference_image,
+                # Never (re)generate GoM renders here: "preprocessed" reads the
+                # images produced by the preprocessing phase, "raw" ignores them
+                # entirely (run_vqa falls back to ex.image_path when no
+                # preprocessed file exists).
                 skip_preproc=True,
             )
 
@@ -382,12 +417,10 @@ def run_prompting_experiments(
         logger.info("[inference:%s] initializing model '%s' (backend=%s, fp8=%s)", experiment_name, model_name, backend, quantize_fp8)
         if backend == "vllm":
             vllm_kwargs = dict(model_name=model_name, system_prompt=system_prompt, quantize_fp8=quantize_fp8)
-            if spec.max_model_len is not None:
-                vllm_kwargs["max_model_len"] = spec.max_model_len
-            if spec.max_pixels is not None:
-                vllm_kwargs["max_pixels"] = spec.max_pixels
-            if spec.max_tokens is not None:
-                vllm_kwargs["max_tokens"] = spec.max_tokens
+            # Per-model load overrides (max_model_len / max_pixels / max_tokens /
+            # gpu_memory_utilization / max_num_batched_tokens / limit_mm_per_prompt)
+            # from the config entry — see gom.ablations.models.ModelSpec.
+            vllm_kwargs.update(spec.vllm_overrides())
             current_model = VllmVLM(**vllm_kwargs)
         else:
             if quantize_fp8:

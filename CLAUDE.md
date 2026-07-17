@@ -187,11 +187,14 @@ generation, scale, architecture, and reasoning axes:
   (reasoning off/on, identical weights) + `LlamaV-o1`, to isolate how
   CoT/graph_guided prompting interacts with native reasoning.
 
-> **⚠️ 2026-07-06 reality check (RTX 3090):** of the `vlm_comparison` set only
-> `InternVL3_5-8B` currently runs end-to-end on the 3090. `LlamaV-o1` (mllama)
-> won't serve on `vllm==0.11.0`, `gemma-3-12b` won't fit in bf16 (and FP8 is dead
-> on Ampere), and `Qwen3-VL-8B`'s ~16k-token GoM prompts don't fit its KV budget.
-> See the "Ablations end-to-end on faretra" session section for numbers.
+> **⚠️ 2026-07-06 reality check, UPDATED 2026-07-14 (RTX 3090):** `InternVL3_5-8B`
+> and `Qwen2.5-VL-7B` run end-to-end on the 3090, and **`Qwen3-VL-8B-Instruct` also
+> runs** — but only via "config D" (`limit_mm video:0` + `max_num_batched_tokens=4096`
+> + `gpu_memory_utilization=0.96`; see "## VLM VRAM fitting on the 3090 — measured
+> (2026-07-14)"). Its blocker was **vision-encoder *video* profiling at engine init**,
+> not the KV/token budget as this line originally claimed. `LlamaV-o1` (mllama) still
+> won't serve on `vllm==0.11.0`, and `gemma-3-12b` OOMs loading bf16 weights (FP8 dead
+> on Ampere). See the 2026-07-14 section for numbers.
 
 Note: there is **no** `Qwen3.5-VL` (Qwen3.5 is text-only); `Qwen3-VL` is the
 current multimodal Qwen. **Reasoning/Thinking models (LlamaV-o1, any
@@ -645,6 +648,16 @@ needs a `max_pixels` cap to bring its ~16k prompt under that window.
   resolves it, **not** that vLLM serves it.) **Disabled in the config.**
 - **`google/gemma-3-12b-it` doesn't fit the 3090 in bf16** (~24 GB) and FP8 is
   unreliable (above). **Disabled on the 3090; run it on the 5090 in bf16.**
+> **⚠️ 2026-07-14 CORRECTION — the "token wall / max_pixels fixes it" story below
+> is WRONG for Qwen3-VL.** A dedicated VRAM-probe run (see "## VLM VRAM fitting on
+> the 3090 — measured (2026-07-14)" below) showed Qwen3-VL's real blocker is that
+> vLLM profiles its **vision encoder with a *video* item at max feature size**
+> (~151k-token budget), which fills the card *at engine init, before any prompt* —
+> `max_pixels` barely dents it. The fix is `limit_mm_per_prompt={"image":1,"video":0}`
+> **plus** `max_num_batched_tokens=4096` **plus** `gpu_memory_utilization=0.96`
+> (all three — "config D"), after which the full 16384-ctx GoM prompt runs. The
+> paragraph below is retained for history; read the 2026-07-14 section for truth.
+
 - **The GoM-prompt token wall — the current blocker (this is a *token-length*
   problem, largely *not* a memory problem).** GoM prompts are an annotated image +
   scene-graph text, and the token count is **dominated by the image's vision
@@ -669,10 +682,11 @@ needs a `max_pixels` cap to bring its ~16k prompt under that window.
 
 ### Current config state & open items
 
-- `slurm_configs/vlm_comparison.yaml` is in a **temporary smoke-test state**:
-  `num_images: 5` (was `-1`), all FP8 removed, and only `OpenGVLab/InternVL3_5-8B`
-  active (LlamaV-o1 / Qwen3-VL / gemma-3-12b commented out). Restore Qwen3-VL and
-  `num_images` for real runs once the token-budget issue is addressed.
+- `slurm_configs/vlm_comparison.yaml` (as of **2026-07-14**) runs `num_images: 100`
+  and three 3090-viable models — `Qwen2.5-VL-7B`, `InternVL3.5-8B` (len 8192), and
+  `Qwen3-VL-8B-Instruct` as **config D** — with FP8 removed and LlamaV-o1 /
+  gemma-3-12b commented out. See "## VLM VRAM fitting on the 3090 — measured
+  (2026-07-14)" below for how config D was derived and why the others are out.
 - **Done (2026-07-07, see "What was changed in code" above):** per-model
   `max_model_len` / `max_pixels` / `max_tokens` via `ModelSpec`; `max_model_len`
   default 2048→8192; vision-token cap (`max_pixels`/`mm_processor_kwargs`) +
@@ -687,6 +701,74 @@ needs a `max_pixels` cap to bring its ~16k prompt under that window.
   scene-graph text is lossless; downscaling the image is a fidelity trade-off).
   (3) Preprocessing is slow — **~100–135 s/image, ~28–37 h for the full
   1000-image set**.
+
+## VLM VRAM fitting on the 3090 — measured (2026-07-14)
+
+A dedicated VRAM-probe run (each model loaded in an **isolated subprocess** via the
+production `gom.ablations.models.VllmVLM`, on a **clean** 24GB card — ~23.4GB free —
+running 6 real GoM prompts) settled which VLMs actually fit and **corrected** the
+earlier "token-wall" story above. The probe harness lived in `vram_probe.py` /
+`run_probe_docker.sh` at the repo root (temporary; may be gone). Key operational
+note: the probe deliberately did **not** go through `main.py` — `run_vlm_comparison`
+does **not** catch a per-model load failure, so one OOM there aborts the whole loop;
+the probe isolates each model so one failure can't kill the batch (and a child's
+exit fully frees VRAM, which vLLM's in-process teardown does not reliably do).
+
+### Round 1 — which of the candidates load/run at all (all bf16 unless noted)
+
+| Model / config | Result | Root cause |
+|---|---|---|
+| **InternVL3.5-8B**, len 8192 | ✅ **WORKS**, 6/6 answers | weights 16.8GB → 21.2GB loaded, **32,944-token KV** (4.0× concurrency) — comfortable |
+| Qwen3-VL-8B-Instruct, len 16384, full image | ❌ load fail | **OOM in `profile_run` dummy-forward** — weights load (17.0GB) then vision-encoder profiling pushes PyTorch to 22.4GB and OOMs (+768MB) |
+| Qwen3-VL-8B-Instruct, len 8192, `max_pixels=200704` | ❌ load fail | `No available memory for the cache blocks` — weights + encoder-profiling budget leave **0 KV** at util 0.90 |
+| Qwen3-VL-8B-**Thinking**, len 8192, `max_pixels=200704` | ❌ load fail | identical to Instruct |
+| **gemma-3-12b-it**, len 4096 | ❌ load fail | **OOM while *loading weights*** — hits 22.8GB placing shards, can't fit the last (112MB free). ~24GB bf16 weights don't fit a 24GB card at all. HF gated auth worked. |
+| Qwen3-VL-8B FP8 (on-the-fly) | ❌ load fail | **Marlin dim error** `size_n = 4304 is not divisible by tile_n_size = 64` — confirms Ampere FP8 is dead |
+
+**The dominant, previously-undocumented culprit for Qwen3-VL:** at engine init vLLM
+logs *"Encoder cache will be initialized with a budget of **151,250 tokens**, and
+profiled with **1 video item of the maximum feature size**"* and runs that dummy
+multimodal forward. That single video-profiling forward is what fills the card on
+top of the 16.8GB weights — **not** the prompt length and **not** the KV cache.
+`max_pixels` caps a *real image's* prompt tokens but does **not** shrink this
+encoder-profiling budget (it only moved 153,600 → 151,250), which is why it "didn't
+help". So the earlier "cut `max_pixels`, then set `max_model_len`" advice was wrong.
+
+### Round 2 — rescuing Qwen3-VL-8B-Instruct at `max_model_len=16384`
+
+Three levers tested **separately then together** (base = bf16, `max_pixels=200704`;
+weights always load fine at 16.7–17.0GB):
+
+| Cfg | Lever(s) | Result | Why |
+|---|---|---|---|
+| A | `limit_mm_per_prompt={image:1, video:0}` | ❌ | **Necessary, not sufficient.** Encoder budget collapses **151,250 → 16,384 tokens** (now profiles "1 *image*"). But at util 0.90 only 0.57GB KV is left; a 16384 seq needs 2.25GB → "estimated max len 4176". |
+| B | `gpu_memory_utilization=0.96` | ❌ | Useless alone — video profiling still on, so it OOMs in the dummy-forward (same wall as round 1). Higher util can't help a transient profiling *peak*. |
+| C | `max_num_batched_tokens=4096` | ❌ | Dodges the dummy-forward OOM, but video profiling still eats the card → `No available memory for the cache blocks`. |
+| **D** | **all three together** | ✅ **WORKS** | video-off frees the encoder budget, batch=4096 tames the profiling peak, util 0.96 buys back KV. |
+
+**Config D (the working recipe):** loads in ~43s (weights 16.7GB), **GPU KV cache
+16,560 tokens** (1.01× concurrency — exactly one 16384-token request, fine for the
+ablations' `batch_size=1`), after-load 19.7GB, **after-inference 23.4GB used /
+0.28GB free** — works but razor-thin. Ran 6/6 real answers (66.7% on the tiny set,
+e.g. `curved`↔gold `curved`). **All three knobs are required — no single lever
+loads.** For a 1000-image run, drop `max_model_len` to ~12288 if you want KV
+headroom. *Thinking* was not re-tested with D; it emits ~2048 reasoning tokens/answer
+against the same KV pool, so it will have even less slack — check before relying on it.
+
+### Baked into config + code (2026-07-14)
+
+- `ModelSpec` / `parse_model_entry` (`ablations/models.py`) now also carry per-model
+  **`gpu_memory_utilization`**, **`max_num_batched_tokens`**, and
+  **`limit_mm_per_prompt`** (a dict, e.g. `{image: 1, video: 0}`), on top of the
+  existing `max_model_len` / `max_pixels` / `max_tokens` / `fp8`. All are surfaced by
+  the new `ModelSpec.vllm_overrides()` helper, and the three runners in
+  `run_experiments.py` build the model with `vllm_kwargs.update(spec.vllm_overrides())`
+  (replacing three copies of the old per-field `if spec.x is not None` block — one
+  place to add future knobs). `VllmVLM` already accepted all of these.
+- `slurm_configs/vlm_comparison.yaml`'s `models:` now runs the three 3090-viable
+  models: `Qwen2.5-VL-7B` (anchor), `InternVL3.5-8B` (len 8192), and
+  `Qwen3-VL-8B-Instruct` as **config D** (the full 5-knob entry). LlamaV-o1 /
+  gemma-3-12b stay commented out with their failure reasons.
 
 ## Why preprocessing is slow & GPU-idle — the matplotlib viz bottleneck (2026-07-07)
 
