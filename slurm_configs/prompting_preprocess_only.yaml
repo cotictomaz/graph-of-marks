@@ -1,8 +1,9 @@
-# Config for `train.sh configs/prompting_experiments.yaml` (see gom.ablations.main).
-# Preprocesses images once with the default config, then evaluates each
-# enabled prompting strategy on every model in `models` (see
-# gom.ablations.run_experiments.run_prompting_experiments and
-# gom.ablations.prompts.build_prompt_template).
+# PREPROCESS-ONLY copy of prompting_experiments.yaml: same base_dir and the same
+# preprocessing_overrides, but `models: []` so no VLM is ever loaded — main.py runs
+# the preprocessing phase and then the prompting runner as a 0-model no-op.
+# force_reprocess: true rebuilds the cached images with the current overrides.
+# Keep preprocessing_overrides in sync with prompting_experiments.yaml, otherwise the
+# images this writes are not the ones that config will read back.
 
 # ==========================================
 # Global settings
@@ -12,7 +13,7 @@ backend: "vllm"
 n_runs: 3
 num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
-force_reprocess: false
+force_reprocess: true   # rebuild the cached images with the overrides below
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
@@ -60,13 +61,10 @@ prompting:
   #   - "Qwen/Qwen3-VL-8B-Instruct"      # reasoning OFF — instruct baseline
   #   - "Qwen/Qwen3-VL-8B-Thinking"      # reasoning ON, same weights → isolates CoT/graph_guided × reasoning
   #   - "omkarthawakar/LlamaV-o1"        # 2nd, independent reasoning model (CoT effect isn't Qwen-specific)
-  models:
-    - name: "Qwen/Qwen2.5-VL-7B-Instruct"  # paper anchor model (Qwen2.5-VL-7B)
-      # GoM prompts measured ~16.3k tokens (log: "decoder prompt (length 16341)");
-      # the default max_model_len=8192 truncated every request → all scored 0.
-      # 24576 clears the largest prompt + generation; 7B leaves ~6GB KV on the 3090,
-      # a single 24k-token seq needs ~1.3GB (fits). Matches vlm_comparison.yaml.
-      max_model_len: 24576
+  # PREPROCESS-ONLY: empty => no vLLM engine is loaded and no inference runs.
+  # The model list lives in prompting_experiments.yaml; run that config (with
+  # skip_preprocessing: true) once these images are built.
+  models: []
 
   # Optional preprocessing parameter overrides applied on top of the pipeline defaults.
   #
