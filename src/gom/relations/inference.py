@@ -223,6 +223,11 @@ class RelationsConfig:
     max_relations_per_object: int = 3
     auto_adjust_relation_cap: bool = True
     min_relations_per_object: int = 1
+    # Objects whose box area is below this fraction of the scene's largest box are
+    # considered small and capped at small_object_relation_cap relations, since
+    # crowding labels around a tiny box is what makes the render unreadable.
+    small_object_area_ratio: float = 0.25
+    small_object_relation_cap: int = 2
     relationship_types: tuple = ("spatial", "semantic", "action")
     confidence_threshold: float = 0.5
     use_clip_relations: bool = True
@@ -264,8 +269,8 @@ class RelationsConfig:
     check_support: bool = True
     check_stability: bool = True
 
-    ablate_max_per_object: bool = False
-    ablate_max_global: bool = False
+    enforce_max_per_object: bool = False
+    enforce_max_global: bool = False
 
 _SPATIAL_KEYS = (
     "left_of",
@@ -1071,7 +1076,7 @@ class RelationInferencer:
             rels_by_src[r["src_idx"]].append(r)
 
         n = len(boxes)
-        if not getattr(self.config, "ablate_max_per_object", False):
+        if not getattr(self.config, "enforce_max_per_object", False):
             max_relations_per_object = self._compute_effective_max_relations_per_object(
                 relationships=relationships,
                 num_objects=n,
@@ -1138,7 +1143,7 @@ class RelationInferencer:
         final: List[dict] = []
         for i, rlist in rels_by_src.items():
             
-            if getattr(self.config, "ablate_max_per_object", False):
+            if getattr(self.config, "enforce_max_per_object", False):
                 # Disattiviamo le euristiche
                 rel_cap = max_relations_per_object
                 rlist_sorted = sorted(rlist, key=rel_sort_key)
@@ -1146,8 +1151,15 @@ class RelationInferencer:
                     final.extend(rlist_sorted[:rel_cap])
             else:
                 rel_cap = max_relations_per_object
+                # Shrink the cap for small objects only. The area_ratio guard below was
+                # missing ever since the heuristic was added: area_ratio was computed but
+                # never tested, and `i < len(areas)` is just a bounds check that is always
+                # true, so the small-object cap was applied to every object and made
+                # max_relations_per_object a no-op above small_object_relation_cap.
                 if i < len(areas):
-                    rel_cap = min(rel_cap, 2)
+                    area_ratio = float(areas[i] / max_area) if max_area > 0 else 1.0
+                    if area_ratio < float(getattr(self.config, "small_object_area_ratio", 0.25)):
+                        rel_cap = min(rel_cap, int(getattr(self.config, "small_object_relation_cap", 2)))
                 if i in question_subject_idxs:
                     rel_cap = max(rel_cap, 3)
 
@@ -1160,15 +1172,18 @@ class RelationInferencer:
                 final.extend(q_sorted + other_sorted[:remaining])
 
         # Global filtering - enforcing that no more than max_relations are extracted
-        if getattr(self.config, "ablate_max_global", False) and hasattr(self.config, "max_relations"):
+        if getattr(self.config, "enforce_max_global", False) and hasattr(self.config, "max_relations"):
                 global_budget = self.config.max_relations
             
                 if global_budget > 0:
-                    def global_sort_key(r):
-                        score = r.get("clip_sim") or r.get("score") or self._get_relation_confidence(r)
-                        return -score if score is not None else 0
-                    
-                    final = sorted(final, key=global_sort_key)[:global_budget - 1]
+                    # Rank with the same key as the per-object cap, so keeping N means
+                    # keeping the N most important: question-relevant first, then relation
+                    # priority (semantic > contact > directional), then confidence/proximity.
+                    # The previous key ranked on the raw score alone, which ignored both of
+                    # those and mixed incomparable scales (inverse distance ~1.0 vs CLIP
+                    # similarity ~0.3), so it effectively kept the N nearest pairs and
+                    # discarded question-relevant and semantically strong relations.
+                    final = sorted(final, key=rel_sort_key)[:global_budget]
                 else:
                     final = []
 

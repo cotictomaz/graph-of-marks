@@ -80,12 +80,32 @@ prompting:
   #     max_detections_total=80) is marked, cluttering the image.
   #   * auto_scale_styles / max_relations already match the current code defaults
   #     (True / 10); pinned here so the paper run stays correct if defaults drift.
-  #   * max_relations_per_object is deliberately NOT set here (left at the code
-  #     default for now).
+  #
+  # Relation capping: enforce a GLOBAL budget of 10 relations per image and NO
+  # per-object limit. max_relations alone does nothing — the global budget is only
+  # applied when enforce_max_global is set, and without either enforce_* flag the
+  # scene graph keeps every geometric edge, so the images showed far more than 10.
+  # The capping settings below are kept identical to vlm_comparison.yaml (note the
+  # two configs still differ on auto_scale_styles, so their images are NOT
+  # interchangeable).
+  #   * enforce_max_global: true      -> actually enforce max_relations (and prune the
+  #                                     scene graph down to it, so graph.json, the
+  #                                     triples text and the drawn arrows all agree).
+  #   * enforce_max_per_object: true  -> take the plain-truncation branch, bypassing the
+  #                                     per-object heuristics (auto_adjust_relation_cap,
+  #                                     which otherwise pins the cap to 1, and the
+  #                                     small-object cap of 2).
+  #   * max_relations_per_object: 999 -> effectively no per-object limit; the 10 are
+  #                                     chosen purely by importance (question-relevant
+  #                                     first, then relation priority, then proximity).
+  #                                     Do NOT use 0 — that means "drop all relations".
   preprocessing_overrides:
     aggressive_pruning: true
     auto_scale_styles: true
     max_relations: 10
+    enforce_max_global: true
+    enforce_max_per_object: true
+    max_relations_per_object: 999
 
   # Toggle strategies on/off, or tune their parameters (e.g. n_shots).
   # See src/gom/ablations/prompts.py for the full set of supported strategies

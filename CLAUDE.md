@@ -894,17 +894,29 @@ preprocessing_overrides:
   max_relations: 10          # already the default (RelationsConfig/preprocessor); pinned
 ```
 
-`ablation_experiments.yaml` is intentionally **untouched** — the grid path
-(`generate_ablated_dataset`) takes **no** `preprocessing_overrides`, so the
-ablation grid keeps the code defaults. `max_relations_per_object` was
-deliberately **not** changed (still `5` in `preprocessor.py` vs the paper's `1` —
-open item). Overrides only take effect on **regeneration**: set
+> **2026-07-17: both blocks gained three more keys** (`enforce_max_global`,
+> `enforce_max_per_object`, `max_relations_per_object: 999`) so that `max_relations:
+> 10` above is *actually enforced* — on its own it did nothing. See "## Relation caps
+> were never enforced" below for why, and read the live YAML for the current block.
+
+`ablation_experiments.yaml` was intentionally **untouched** at the time — but this
+is now **stale**: the grid path has since gained its own `preprocessing_overrides`
+(`main.py:493` → `generate_ablated_dataset(..., preprocessing_overrides=...)`), and
+that file pins `aggressive_pruning: true` / `auto_scale_styles: false` across every
+grid point (the swept grid params still win on a key collision). `max_relations_per_object`
+was deliberately **not** changed here (still `5` in `preprocessor.py` vs the paper's
+`1` — open item) — **superseded 2026-07-17**: vlm_comparison/prompting now pin
+`max_relations_per_object: 999` to disable per-object capping (see "## Relation caps
+were never enforced" below). Overrides only take effect on **regeneration**: set
 `skip_preprocessing: false` + `force_reprocess: true` to rebuild the stale images
 (inference otherwise reads them from disk). The vlm_comparison and prompting
-preprocessing outputs are **content-identical** (same dataset/subsample, same
-overrides, deterministic pipeline) but land in different `{base_dir}` trees, so
-one can be generated once and **symlinked** into the other's
-`preprocessed_images/<exp>/default/` to avoid preprocessing twice.
+preprocessing outputs are content-identical **only while the two configs'
+`preprocessing_overrides` blocks actually match** (same dataset/subsample, same
+overrides, deterministic pipeline); when they do, they land in different
+`{base_dir}` trees, so one can be generated once and **symlinked** into the other's
+`preprocessed_images/<exp>/default/` to avoid preprocessing twice. **Diff the two
+blocks before symlinking** — they have drifted before (`auto_scale_styles`), and a
+symlink silently serves the wrong images.
 
 ### Preprocess-only run pattern
 
@@ -914,6 +926,181 @@ true`; `main.py` runs the preprocessing phase then the inference runner as a
 0-model no-op. Used 2026-07-08 to rebuild `vlm_comparison`'s images with the
 pruning fix before the real comparison run. Remember to flip
 `skip_preprocessing`/`force_reprocess`/`models` back afterward.
+
+## Relation caps were never enforced — audit, fix & rename (2026-07-17)
+
+An audit of the `ablate_max_relations_global` / `ablate_max_relations_per_object`
+grids (counting edges in the saved `*_graph.json`, i.e. links carrying a
+`relation` attribute — the structural `scene -> object` edges have none and are
+excluded; this count matches `*_graph_triples.txt` exactly) found **both caps were
+silently ignored in the output**:
+
+| grid | violating images | worst case |
+|---|---|---|
+| `max_relations` X ∈ {0,4,8,12,16,24,32} | **52% → 18%** (falls as X rises) | 60 relations at **X=0**; 88 at X=32 |
+| `max_relations_per_object` Y ∈ {1,3,5,7,9} | **68% → 16%** | out-degree 15 at Y=9 (48.7% of objects violate at Y=1) |
+
+`max_relations_0/` containing images with 60 relations is the giveaway. Violations
+*fall* as the cap rises because the caps never bound anything — scene geometry did.
+
+### Root cause — `build_scene_graph` never knew about the caps
+
+`limit_relationships_per_object` (`inference.py`) correctly produces the capped
+`rels_all` (`preprocessor.py:3961`), and `drop_inverse_duplicates` only removes.
+Then `build_scene_graph` (`preprocessor.py:361`, called at `:4036`) **rebuilds its
+own edge set from proximity alone** — `_candidate_neighbors` (`scene_graph.py:607`)
+keeps every neighbour within `max_dist_norm=0.4` up to `max_neighbors=32`, and
+`_maybe_add_edge` (`:626`) only drops pairs with `iou < min_iou_keep=0.01` **and**
+`clip_sim < 0.20` (so in crowded, overlapping COCO scenes almost nothing is
+dropped). The `rels_all` loop at `:4047-4057` then merely *labels or adds* edges —
+it can never remove one — and the fallback at `:4089` labels every leftover
+geometric edge via `_infer_relation_from_attrs`, promoting it to a full relation.
+
+This was never only a `graph.json` problem: `rels_for_viz` (`:4114`) is re-extracted
+**from the scene graph**, so the surplus edges reached the drawn arrows too, and
+`graph_to_triples_text` (`prompt.py:445-447`) **re-infers a relation for any edge
+lacking one** — so unlabelling an edge is useless, it must be **deleted**.
+
+### The fix — prune the graph down to `rels_all`
+
+A prune block (`preprocessor.py`, right after the labeling loop) deletes every
+object-object edge not in `rels_all`. **Order matters**: it runs *after* the
+labeling loop, which first adds any capped relation geometry never proposed, so
+`rels_all ⊆ edges` and the result is exactly the capped set. Gated:
+
+```python
+if need_rel and (self.cfg.enforce_max_global or self.cfg.enforce_max_per_object):
+```
+
+`need_rel` matters — when relations were never inferred `rels_all` is `[]` meaning
+"unknown", not "capped to zero"; pruning there would strip a legitimately
+un-capped graph. (`:4132` already gates the viz extraction the same way.) The
+`enforce_*` gate keeps the **default pipeline unchanged** unless a config opts in.
+
+Alternative rejected: capping inside `build_scene_graph`. It selects by *nearest*,
+not by importance; it has no global-budget concept; and it wouldn't work anyway —
+the labeling loop's `add_edge` can push a node back over the cap regardless.
+
+### Global cap: off-by-one + it kept the *nearest* N, not the most important
+
+Two separate bugs in the global filter (`inference.py`):
+
+- **Off-by-one**: `sorted(...)[:global_budget - 1]` → `max_relations=1` yielded **0**
+  relations, `=4` yielded 3. Now `[:global_budget]`.
+- **Wrong ranking**: the old `global_sort_key` sorted on raw score only, **dropping
+  both** question-relevance and relation priority — the two things the per-object
+  stage had just prioritised. Worse, that single axis mixes **incomparable scales**,
+  because relation dicts carry different fields: geometric relations have only
+  `{src_idx, tgt_idx, relation, distance}` → `_get_relation_confidence` falls back to
+  inverse distance `1/(1+d/100)` (≈1.0 when close); physics/3D carry `confidence`
+  0.75–0.8; CLIP relations carry `clip_sim` ≈0.2–0.3. Measured: a `touching` pair at
+  d=5px scores **0.952**, beating a priority-4 `on_top_of` (0.800) and `holding`
+  (0.280). Inverse distance beats `confidence=0.8` whenever d<25px and `clip_sim=0.28`
+  whenever d<~300px — i.e. **the global cap approximated "keep the N nearest pairs"**
+  and CLIP relations were almost always ranked last.
+
+Now it reuses the per-object `rel_sort_key`, so both axes agree on "most important":
+`(q_priority, -rel_priority, -score, distance)` → question-relevant first, then
+relation priority (`_get_relation_priority`: semantic 4 > contact 3 > proximity/
+directional 2 > other 0), then confidence/proximity. Budgets nest properly (each
+larger N extends the smaller). **Residual**: the 3rd term still mixes scales, so
+within one priority tier a close geometric relation outranks a CLIP one.
+
+### The small-object guard (`area_ratio`) was never wired up
+
+`if i < len(areas): rel_cap = min(rel_cap, 2)` — the comments (`# Compute area-based
+caps to avoid overcrowding small objects.` / `# Shrink cap for small objects`) say it
+should only hit **small** objects, but `i < len(areas)` is a **bounds check that is
+always true**. Introduced in `d229a79` already broken: it computed
+`area_ratio = areas[i]/max_area` and **never tested it**; `6436842` then deleted the
+`area_ratio` line entirely, leaving `max_area` as dead code. So a small-object cap
+applied to **every** object, making `max_relations_per_object` a no-op above 2.
+
+Fixed: the guard now tests `area_ratio` against **`RelationsConfig.small_object_area_ratio`
+(0.25)** and clamps to **`small_object_relation_cap` (2)**; `max_area` is live again.
+The ratio is relative to the scene's **largest box** (the original author's design),
+not the image. **The 0.25 threshold is a judgement call** — the original never had one.
+⚠️ Both new fields live on `RelationsConfig` **only**, so they are **not settable from
+YAML**: `update_cfg_correct` skips any key absent from `PreprocessorConfig`
+(`ablations/utils.py:53`) — add them there too if they need to be tunable.
+
+### ⚠️ `auto_adjust_relation_cap` makes `max_relations_per_object` inert
+
+`_compute_effective_max_relations_per_object` runs **before** the per-object branch
+and, whenever `auto_adjust_relation_cap` is on, returns **1 for any scene size**
+(measured for n=2…60): `cap = ceil(min(max_relations, ~n, rel_count) / n)`. It is
+**on by default** (`preprocessor.py:474`), so in `vlm_comparison` / `prompting` /
+`ablate_edge_thickness` the effective cap is 1 and `max_relations_per_object` does
+nothing. `main.py` turns it **off** for `ablate_edge_color` and
+`ablate_max_relations_global` (cap stays 3). This is why the `area_ratio` fix is a
+no-op for the former group and live for the latter.
+
+Also note the non-ablation branch makes the per-object cap a **soft** limit:
+`final.extend(q_sorted + other_sorted[:remaining])` extends `q_sorted` **in full**,
+so an object with more question-relevant relations than `rel_cap` exceeds it by
+design. The `enforce_max_per_object=True` branch truncates cleanly instead.
+
+### Renamed toggles: `ablate_*` → `enforce_*`
+
+`ablate_max_global` → **`enforce_max_global`**, `ablate_max_per_object` →
+**`enforce_max_per_object`** (all 27 occurrences: `inference.py`, `preprocessor.py`,
+`main.py`, both YAMLs — including the `getattr(self.config, "...", False)` string
+literals). The old names implied "this is ablation-only machinery"; they are now the
+pipeline's real cap switches. Semantics:
+
+- **`enforce_max_global`** — apply `max_relations` (and prune the graph to it).
+- **`enforce_max_per_object`** — enforce `max_relations_per_object` **literally**,
+  bypassing the heuristics (`auto_adjust_relation_cap`, the small-object cap).
+
+**There is no "no per-object cap" switch.** `limit_relationships_per_object` always
+runs one of two branches; the flag picks *which*. The heuristic branch (`False`)
+cannot be neutralised — auto-adjust pins it to 1. So **"global-only capping" is
+expressed as `enforce_max_per_object: true` + `max_relations_per_object: 999`** (a
+big number, not `0` — `0` means "drop all relations").
+
+### vlm_comparison / prompting now enforce a global-only cap of 10
+
+`max_relations: 10` had been in both configs since 2026-07-08 doing **nothing**
+(the global filter only runs under `enforce_max_global`). Both now carry:
+
+```yaml
+preprocessing_overrides:
+  aggressive_pruning: true
+  auto_scale_styles: false        # true in prompting — the two configs differ here
+  max_relations: 10
+  enforce_max_global: true        # actually enforce the 10, and prune the graph to it
+  enforce_max_per_object: true    # bypass the per-object heuristics
+  max_relations_per_object: 999   # => no per-object limit
+```
+
+Result: ≤10 relations per image, chosen purely by importance, with `graph.json`, the
+triples text and the drawn arrows all agreeing. **This is a large visual change** —
+those images previously showed an uncapped geometric graph. Render one image and
+look at it before committing to a full run.
+
+### What must be re-run (`force_reprocess: true`)
+
+| run | affected by | re-run? |
+|---|---|---|
+| `ablate_max_relations_global` | prune + off-by-one + ranking + area guard | **yes** (7 grid pts) |
+| `ablate_max_relations_per_object` | prune (takes the `enforce` branch; area guard N/A) | **yes** (5 grid pts) |
+| `ablate_edge_color` | area guard only (auto-adjust off → cap 3, so 2→3 on large objects) | **yes** (3 grid pts) |
+| `vlm_comparison` / `prompting` | now opt into global-only capping | **yes** |
+| `ablate_edge_thickness` | nothing (auto-adjust → cap 1 → area guard unreachable) | no |
+
+~100–135 s/image; at `num_images: 100` budget ~3 h per grid point.
+
+### Verification status (2026-07-17)
+
+Verified **without a GPU** (host has no torch — run tests via
+`docker run --rm -v "$PWD":/workspace -w /workspace gom:latest python3 ...`):
+the cap function's global budget/ranking; the prune reducing a real
+`build_scene_graph` (24 geometric edges → exactly the capped set, scene edges/nodes
+intact, X=0 → 0); the area guard discriminating by size; and the renamed toggles
+propagating YAML → `PreprocessorConfig` → `RelationsConfig` via the real
+`update_cfg_correct` (driven with a stub preprocessor — no models needed).
+**Not** verified end-to-end on a real image: the first regenerated grid point is the
+real test — re-run the audit against it and expect zero violations.
 
 ## Legacy / Reference Files
 

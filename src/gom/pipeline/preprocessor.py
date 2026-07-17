@@ -604,8 +604,8 @@ class PreprocessorConfig:
     color_sat_boost: float = 1.1  # Saturation boost factor
     color_val_boost: float = 1.1  # Value/brightness boost factor
 
-    ablate_max_global: bool = False
-    ablate_max_per_object: bool = False
+    enforce_max_global: bool = False
+    enforce_max_per_object: bool = False
 
 
 # ----------------------------- Main Preprocessor Class -----------------------------
@@ -771,8 +771,8 @@ class ImageGraphPreprocessor:
         rels_cfg = RelationsConfig()    
         rels_cfg.max_relations = self.cfg.max_relations # Added max_relations to the call to be able to do some ablations with this parameter
         rels_cfg.auto_adjust_relation_cap = self.cfg.auto_adjust_relation_cap
-        rels_cfg.ablate_max_global = self.cfg.ablate_max_global
-        rels_cfg.ablate_max_per_object = self.cfg.ablate_max_per_object
+        rels_cfg.enforce_max_global = self.cfg.enforce_max_global
+        rels_cfg.enforce_max_per_object = self.cfg.enforce_max_per_object
         # Honor explicit preprocessor flags if present; defer to the
         # PreprocessorConfig.enable_spatial_3d flag so users can toggle it via
         # CLI or overrides. Defaults to False.
@@ -4083,6 +4083,26 @@ class ImageGraphPreprocessor:
                     # If anything goes wrong here, don't break the pipeline; keep original relation
                     pass
             
+            # Prune the graph down to `rels_all`, the capped relation set produced by
+            # limit_relationships_per_object + drop_inverse_duplicates. build_scene_graph
+            # derives its edges from proximity alone and knows nothing about the caps, so
+            # without this the surplus geometric edges reach graph.json, the triples text
+            # and (via rels_for_viz below) the drawn arrows, defeating max_relations and
+            # max_relations_per_object.
+            #
+            # Restricted to the max_relations / max_relations_per_object ablations: the
+            # default pipeline has always drawn the un-pruned geometric edges, so enforcing
+            # the cap everywhere would change every non-ablation image. Also gated on
+            # need_rel, since an empty rels_all there means "relations were never inferred",
+            # not "the cap dropped everything".
+            if need_rel and (self.cfg.enforce_max_global or self.cfg.enforce_max_per_object):
+                kept_edges = {(int(r["src_idx"]), int(r["tgt_idx"])) for r in rels_all}
+                for u, v in list(scene_graph.edges()):
+                    if scene_graph.nodes[u].get("label") == "scene" or scene_graph.nodes[v].get("label") == "scene":
+                        continue
+                    if (u, v) not in kept_edges:
+                        scene_graph.remove_edge(u, v)
+
             # FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
             # This prevents inconsistency between triples.txt (which infers relations) and JSON output
             from gom.graph.prompt import _infer_relation_from_attrs

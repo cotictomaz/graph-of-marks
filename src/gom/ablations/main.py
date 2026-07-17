@@ -230,8 +230,8 @@ def apply_experiment_config(preproc_obj, exp_name: str):
         "rel_arrow_linewidth": 2.0,
         "auto_adjust_relation_cap": True,
         "cap_relations_per_object": False,
-        "ablate_max_per_object": False,
-        "ablate_max_global": False,
+        "enforce_max_per_object": False,
+        "enforce_max_global": False,
         "min_relations_per_object": 1,
         "max_relations_per_object": 3,
         "color_edge": "head"
@@ -247,7 +247,7 @@ def apply_experiment_config(preproc_obj, exp_name: str):
             "rel_arrow_linewidth": 2.0,
             "auto_adjust_relation_cap": False,
             "cap_relations_per_object": True,
-            "ablate_max_per_object": True
+            "enforce_max_per_object": True
         }
 
     elif exp_name == "ablate_edge_color":
@@ -255,8 +255,8 @@ def apply_experiment_config(preproc_obj, exp_name: str):
             "rel_arrow_linewidth": 2.0,
             "auto_adjust_relation_cap": False,
             "cap_relations_per_object": True,
-            "ablate_max_per_object": False,
-            "ablate_max_global": False,
+            "enforce_max_per_object": False,
+            "enforce_max_global": False,
             "min_relations_per_object": 0,
             "max_relations_per_object": 3
         }
@@ -267,9 +267,9 @@ def apply_experiment_config(preproc_obj, exp_name: str):
             "cap_relations_per_object": False,
             "min_relations_per_object": 0,
             "max_relations_per_object": 3,
-            "ablate_max_per_object": False,
+            "enforce_max_per_object": False,
             "rel_arrow_linewidth": 2.0,
-            "ablate_max_global": True,
+            "enforce_max_global": True,
             "color_edge": "head"
         }
 

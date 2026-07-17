@@ -19,7 +19,7 @@ questions_per_image: 1  # how many questions to keep per image; -1 = all questio
 
 # Set to true only when the ablation_grid or preprocessing pipeline changed
 # since the last run; it overwrites the existing preprocessed images.
-force_reprocess: false
+force_reprocess: true
 
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
