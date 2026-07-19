@@ -1,0 +1,66 @@
+# SPATIAL raw-image baseline: runs Qwen2.5-VL on the UNTOUCHED source images (no
+# GoM render, no scene-graph text) over the SAME spatial subset as
+# vlm_comparison_preprocess_only.yaml. This is the no-GoM control for the spatial
+# vlm_comparison run — same dataset, same spatial filter, same 250x1 subsample,
+# same scorer; the only difference is the model sees a plain COCO image.
+#
+# ⚠️ Keeps its OWN base_dir (vlm_comparison_spatial_raw). run_vqa resumes from an
+# existing raw_results.json — pointed at the preprocessed tree it would load the
+# GoM run's answers, skip every example, and report those as the baseline.
+# Nothing is preprocessed here, so no GoM artifacts are read or written and the
+# vlm_comparison_spatial preprocess outputs are never touched.
+
+# ==========================================
+# Global settings
+# ==========================================
+base_dir: "/workspace/ablation_studies/vlm_comparison_spatial_raw"
+backend: "vllm"
+n_runs: 3
+num_images: 250          # match vlm_comparison_preprocess_only.yaml (same example set)
+questions_per_image: 1   # match vlm_comparison_preprocess_only.yaml
+force_reprocess: false   # unused here: nothing is preprocessed
+
+# Question-level dataset filter — MUST match vlm_comparison_preprocess_only.yaml
+# exactly, or the baseline and the GoM run score different example sets.
+dataset_filter:
+  mode: "spatial"
+
+# Single flat VQAv1 JSON (list of {image_path, question, answers}).
+dataset_path: "/workspace/vqav1_limited_1000.json"
+
+# --- Image location (see README_SLURM.md §2.1 "Images live only on node 40") ---
+# moro232 is not node 40, so fetch over HTTP. image_cache_dir points at the spatial
+# preprocess run's cache so the 250 source images already downloaded there are
+# reused instead of re-fetched (read-only reuse; does not touch that run's GoM images).
+images_dir: "/images"
+images_base_url: "http://137.204.107.40:8000"
+image_cache_dir: "/workspace/ablation_studies/vlm_comparison_spatial/image_cache"
+
+ablations:
+  enabled: false
+
+# ==========================================
+# VLM comparison experiment — spatial raw-image baseline
+# ==========================================
+vlm_comparison:
+  enabled: true
+
+  # No preprocessing phase: nothing reads a GoM render, so main.py never builds
+  # the ~6GB preprocessor and the VLM gets the whole card immediately.
+  skip_preprocessing: true
+
+  # The two baseline knobs (see gom.ablations.run_experiments.run_vlm_comparison):
+  #   inference_image:     "raw" ⇒ the model sees the source image, not a GoM render
+  #   include_scene_graph: false ⇒ no scene-graph triples in the prompt
+  # Both ⇒ the no-GoM control.
+  inference_image: "raw"
+  include_scene_graph: false
+
+  # Raw COCO images are ~640x480 ⇒ only ~400 vision tokens, so none of the GoM
+  # 24GB-card acrobatics apply: 4096 context is generous at the default util 0.90.
+  models:
+    - name: "Qwen/Qwen2.5-VL-7B-Instruct"   # paper anchor (Qwen2.5-VL-7B)
+      max_model_len: 4096
+
+prompting:
+  enabled: false
