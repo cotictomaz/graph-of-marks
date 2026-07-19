@@ -305,6 +305,12 @@ def main():
     num_images       = cfg.get("num_images", cfg.get("num_examples", -1))
     questions_per_image = cfg.get("questions_per_image", -1)
     force_reprocess  = cfg.get("force_reprocess", False)
+    # Optional question-level dataset filter, applied to the FULL dataset before
+    # the num_images / questions_per_image subsample below (so num_images counts
+    # only the kept examples). mode "none" = no filter; "spatial" = keep only
+    # spatial-reasoning questions (see gom.ablations.spatial_filter).
+    dataset_filter_cfg  = cfg.get("dataset_filter", {}) or {}
+    dataset_filter_mode = dataset_filter_cfg.get("mode", "none")
     dataset_path     = cfg.get("dataset_path")
     images_dir       = cfg.get("images_dir")
     images_base_url  = cfg.get("images_base_url")
@@ -379,6 +385,7 @@ def main():
         "n_runs": n_runs,
         "num_images": num_images,
         "questions_per_image": questions_per_image,
+        "dataset_filter": dataset_filter_mode,
         "force_reprocess": force_reprocess,
         "dataset_path": dataset_path,
         "images_dir": images_dir,
@@ -401,6 +408,39 @@ def main():
 
     logger.info("Dataset built: %d VQA examples from %d unique images.",
                 len(dataset), len({ex.image_id for ex in dataset}))
+
+    # Optional question-level filter, applied to the FULL dataset BEFORE the
+    # num_images / questions_per_image subsample so the subsample draws from the
+    # kept examples only (e.g. num_images=100 → 100 *spatial* images, not 100
+    # images of which some are spatial). Order is preserved, so the subsample
+    # and cross-run comparability stay deterministic.
+    # NB: raw vs preprocessed runs are only comparable if BOTH use the same
+    # dataset_filter — keep the block in sync across the paired configs.
+    if dataset_filter_mode == "spatial":
+        from .spatial_filter import filter_spatial_examples
+        before = len(dataset)
+        dataset = filter_spatial_examples(
+            dataset,
+            keywords=dataset_filter_cfg.get("keywords"),
+            extra_keywords=dataset_filter_cfg.get("extra_keywords"),
+        )
+        n_imgs = len({ex.image_id for ex in dataset})
+        print(
+            f"🧭 Filtro 'spatial': {len(dataset)}/{before} esempi mantenuti "
+            f"({n_imgs} immagini uniche)."
+        )
+        logger.info("dataset_filter=spatial: kept %d/%d examples across %d unique images.",
+                    len(dataset), before, n_imgs)
+        if not dataset:
+            raise RuntimeError(
+                "dataset_filter='spatial' rimosso ogni esempio (0 domande spaziali). "
+                "Verifica dataset_path o allarga dataset_filter.keywords / extra_keywords."
+            )
+    elif dataset_filter_mode not in ("none", None):
+        raise ValueError(
+            f"dataset_filter.mode non valido: {dataset_filter_mode!r}. "
+            "Valori ammessi: 'none' (default) o 'spatial'."
+        )
 
     # Subsample by unique image and (independently) by questions per image.
     #   • num_images > 0          → keep only the first ``num_images`` distinct

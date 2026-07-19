@@ -13,6 +13,18 @@ num_images: 100       # how many unique images to keep; -1 = all images
 questions_per_image: -1  # how many questions to keep per image; -1 = all questions
 force_reprocess: false  # use the already-generated preprocessed images (no preprocessing step)
 
+# Optional question-level dataset filter, applied to the FULL dataset BEFORE the
+# num_images/questions_per_image subsample (so num_images counts kept examples
+# only). Keeps only questions that involve spatial reasoning — for testing the
+# VLMs' spatial ability specifically. See gom.ablations.spatial_filter.
+#   mode: "none" (default, no filter) | "spatial"
+#   keywords:       [...]  # OPTIONAL: replace the default spatial lexicon entirely
+#   extra_keywords: [...]  # OPTIONAL: add terms to the default lexicon
+# ⚠️ For a raw-vs-preprocessed comparison, vlm_comparison_raw.yaml MUST use the
+# SAME dataset_filter block, or the two runs score different example sets.
+# dataset_filter:
+#   mode: "spatial"
+
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
 
@@ -78,27 +90,27 @@ vlm_comparison:
   # 2026-07-14: this run is Qwen3-VL ONLY (vllm inference side, skip_preprocessing:
   # true → reads existing preprocessed images). Uncomment the anchors for the full
   # comparison.
-  # - name: "Qwen/Qwen2.5-VL-7B-Instruct"   # paper anchor (Qwen2.5-VL-7B)
-  #   max_model_len: 24576                  #   must exceed the largest prompt (~17.1k) + generation
+    - name: "Qwen/Qwen2.5-VL-7B-Instruct"   # paper anchor (Qwen2.5-VL-7B)
+      max_model_len: 24576                  #   must exceed the largest prompt (~17.1k) + generation
   # - name: "OpenGVLab/InternVL3_5-8B"      # bf16; ~4k-token prompts, ~33k-token KV — comfortable
   #   max_model_len: 8192
 
     # Qwen3-VL-8B-Instruct — "config D" (the ONLY config that fits 16384 ctx on a
     # 24GB 3090). All three knobs are required together; see the per-model notes above.
-    - name: "Qwen/Qwen3-VL-8B-Instruct"
-      max_model_len: 17000        # 2026-07-14: raised 16384->17000 to clear the busiest
-                                  #   GoM prompts (observed up to 16969 tok; ~30% overflowed
-                                  #   16384 and scored 0). NB the KV pool is memory-bound, so
-                                  #   17000 also needs a higher util (below) or load fails with
-                                  #   "estimated max model length 16560".
-      max_pixels: 200704          #   NB: this does NOT effectively cap Qwen3-VL's vision tokens
-                                  #   here — the ~16k prompt is ~15k VISION tokens (scene-graph
-                                  #   text is tiny). Cutting vision tokens is the real fix if this
-                                  #   still overflows / hangs (razor-thin ~0.1GB free at 17000).
-      gpu_memory_utilization: 0.97  # 0.96 gave only 16,560-token KV (< 17000); 0.97 ≈ 17.8k-token
-                                  #   pool so a single 17000-token request fits. Thinner headroom.
-      max_num_batched_tokens: 4096
-      limit_mm_per_prompt: {image: 1, video: 0}
+    # - name: "Qwen/Qwen3-VL-8B-Instruct"
+    #   max_model_len: 17000        # 2026-07-14: raised 16384->17000 to clear the busiest
+    #                               #   GoM prompts (observed up to 16969 tok; ~30% overflowed
+    #                               #   16384 and scored 0). NB the KV pool is memory-bound, so
+    #                               #   17000 also needs a higher util (below) or load fails with
+    #                               #   "estimated max model length 16560".
+    #   max_pixels: 200704          #   NB: this does NOT effectively cap Qwen3-VL's vision tokens
+    #                               #   here — the ~16k prompt is ~15k VISION tokens (scene-graph
+    #                               #   text is tiny). Cutting vision tokens is the real fix if this
+    #                               #   still overflows / hangs (razor-thin ~0.1GB free at 17000).
+    #   gpu_memory_utilization: 0.97  # 0.96 gave only 16,560-token KV (< 17000); 0.97 ≈ 17.8k-token
+    #                               #   pool so a single 17000-token request fits. Thinner headroom.
+    #   max_num_batched_tokens: 4096
+    #   limit_mm_per_prompt: {image: 1, video: 0}
   #   - name: "omkarthawakar/LlamaV-o1"     # DISABLED: mllama unservable (vllm 0.11.0 + transformers 4.57.6)
   #   - name: "google/gemma-3-12b-it"       # DISABLED on 3090: OOMs loading bf16 weights; run on the 5090
 

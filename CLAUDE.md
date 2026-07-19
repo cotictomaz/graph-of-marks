@@ -284,6 +284,26 @@ Note this replaced the previous behaviour where `num_examples` silently kept
 only the **first** question of each selected image — `questions_per_image: -1`
 (the default) now keeps them all.
 
+**Question-level `dataset_filter` (`gom.ablations.spatial_filter`).** An optional
+global `dataset_filter:` block runs a question-text filter over the **full**
+dataset **before** the `num_images`/`questions_per_image` subsample — so
+`num_images: 100` under a filter yields 100 *kept* images, not 100 images of
+which some pass. Currently one `mode`: `"spatial"` (default `"none"`), which
+keeps only questions containing a spatial cue via a transparent, dependency-free
+word-boundary lexicon (`DEFAULT_SPATIAL_TERMS`: phrases like `on top of` /
+`to the left of` plus unambiguous single words `above`/`behind`/`between`…;
+ubiquitous bare prepositions `on`/`in`/`at` are **excluded**). Overridable per
+config: `keywords:` replaces the lexicon, `extra_keywords:` extends it (an empty
+list falls back to the default; a blank-only list raises). It is a heuristic —
+`"what is left on the plate?"` (left=remaining) is a known, documented false
+positive. Filtering preserves first-seen order, so the subsample and cross-run
+comparability stay deterministic; an unknown `mode` **raises** (no silent
+no-op), and an all-filtered-out result raises. **Comparability caveat:** a raw
+vs preprocessed pair (`vlm_comparison_raw.yaml` vs `vlm_comparison.yaml`) is only
+comparable if **both** carry the identical `dataset_filter` block. Wired in
+`main.py` between `build_vqa_examples` and the subsample block (single insertion
+point).
+
 **Image resolution / the node-40 problem** (`_resolve_local_image`): the JSON
 stores only basenames, and the actual `.jpg` files live **only on node 40
 (faretra)** with no shared filesystem across cluster nodes. For each unique

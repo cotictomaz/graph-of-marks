@@ -21,6 +21,13 @@ num_images: 100       # keep in sync with vlm_comparison.yaml so the two are com
 questions_per_image: -1
 force_reprocess: false  # unused here: nothing is preprocessed
 
+# Question-level dataset filter — see gom.ablations.spatial_filter. This MUST
+# match vlm_comparison.yaml's dataset_filter block exactly, or the baseline and
+# the GoM run score different example sets and are no longer comparable.
+#   mode: "none" (default) | "spatial"
+# dataset_filter:
+#   mode: "spatial"
+
 # Single flat VQAv1 JSON (list of {image_path, question, answers}).
 dataset_path: "/workspace/vqav1_limited_1000.json"
 
