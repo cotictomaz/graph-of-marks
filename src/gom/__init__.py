@@ -62,6 +62,9 @@ Exports:
 """
 from __future__ import annotations
 
+from importlib import import_module
+from typing import Any
+
 __all__ = [
     # High-level API
     "GoM",
@@ -91,20 +94,43 @@ __all__ = [
 
 __version__ = "1.1.0"
 
-# High-level API
-from .api import GOM_STYLE_PRESETS, GoM, Gom, GomStyle, GraphOfMarks, ProcessingConfig, create_pipeline, run
+_LAZY_IMPORTS = {
+    # High-level API
+    "GOM_STYLE_PRESETS": (".api", "GOM_STYLE_PRESETS"),
+    "GoM": (".api", "GoM"),
+    "Gom": (".api", "Gom"),
+    "GomStyle": (".api", "GomStyle"),
+    "GraphOfMarks": (".api", "GraphOfMarks"),
+    "ProcessingConfig": (".api", "ProcessingConfig"),
+    "create_pipeline": (".api", "create_pipeline"),
+    "run": (".api", "run"),
+    # Configuration objects
+    "PreprocessorConfig": (".config", "PreprocessorConfig"),
+    "RelationsConfig": (".config", "RelationsConfig"),
+    "SegmenterConfig": (".config", "SegmenterConfig"),
+    "VisualizerConfig": (".config", "VisualizerConfig"),
+    "default_config": (".config", "default_config"),
+    # Pipeline
+    "ImageGraphPreprocessor": (".pipeline.preprocessor", "ImageGraphPreprocessor"),
+    # Public types
+    "Box": (".types", "Box"),
+    "Detection": (".types", "Detection"),
+    "MaskDict": (".types", "MaskDict"),
+    "Relationship": (".types", "Relationship"),
+}
 
-# Configuration objects
-from .config import (
-    PreprocessorConfig,
-    RelationsConfig,
-    SegmenterConfig,
-    VisualizerConfig,
-    default_config,
-)
 
-# Pipeline (advanced users)
-from .pipeline.preprocessor import ImageGraphPreprocessor
+def __getattr__(name: str) -> Any:
+    """Load public exports only when they are first accessed."""
+    try:
+        module_name, attribute_name = _LAZY_IMPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
 
-# Core public types
-from .types import Box, Detection, MaskDict, Relationship
+    value = getattr(import_module(module_name, __name__), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

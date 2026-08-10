@@ -145,6 +145,8 @@ except Exception as _exc:
         apply_question_filter: bool = True
         aggressive_pruning: bool = False  # Keep only objects mentioned in question
         filter_relations_by_question: bool = True
+        relation_selection_policy: str = "question_only"
+        paper_ranked_max_relations: int = 16
         threshold_object_similarity: float = 0.50  # CLIP similarity threshold for objects
         threshold_relation_similarity: float = 0.50  # CLIP similarity threshold for relations
         clip_pruning_threshold: float = 0.25  # Minimum CLIP score to keep detection
@@ -154,12 +156,12 @@ except Exception as _exc:
 
         # Object detector configuration and confidence thresholds
         detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-        threshold_owl: float = 0.10  # OWL-ViT confidence threshold
-        threshold_yolo: float = 0.25  # YOLOv8 confidence threshold
+        threshold_owl: float = 0.50  # OWL-ViT confidence threshold
+        threshold_yolo: float = 0.50  # YOLOv8 confidence threshold
         threshold_detectron: float = 0.50  # Detectron2 confidence threshold
         threshold_grounding_dino: float = 0.30  # GroundingDINO confidence threshold
         grounding_dino_text_threshold: float = 0.25  # GroundingDINO text similarity threshold
-        auto_detector_thresholds: bool = True
+        auto_detector_thresholds: bool = False
         auto_threshold_min_default: float = 0.25
         auto_threshold_min_owl: float = 0.25
         auto_threshold_min_yolo: float = 0.25
@@ -175,20 +177,21 @@ except Exception as _exc:
         relations_per_src_clip_pairs: int = 50  # Per-source limit on CLIP-scored candidates
 
         # Non-Maximum Suppression and fusion parameters
-        label_nms_threshold: float = 0.25  # IoU threshold for per-label NMS
+        label_nms_threshold: float = 0.50  # IoU threshold for per-label NMS
         seg_iou_threshold: float = 0.50  # IoU threshold for segmentation mask merging
-        wbf_iou_threshold: float = 0.10  # IoU threshold for Weighted Boxes Fusion
+        wbf_iou_threshold: float = 0.90  # IoU threshold for Weighted Boxes Fusion
         skip_box_threshold: float = 0.10  # Skip boxes below this confidence in fusion
-        
-        # Advanced deduplication parameters
+        # Paper-faithful fusion (c438ebc): raw concat of detectors + per-class greedy NMS,
+        # no WBF/cross-class/group-merge/semantic-dedup. Opt-in; default keeps gom behavior.
+        paper_faithful_fusion: bool = False
+        early_nms_threshold: float = 0.50  # per-class NMS IoU after fusion (paper value)
+
+        # Advanced deduplication and merging options
         cross_class_suppression: bool = True  # Remove overlaps between different classes
         cross_class_iou_threshold: float = 0.65  # IoU threshold for cross-class suppression
         same_class_iou_threshold: float = 0.30  # IoU threshold for same-class deduplication
+        same_class_mask_iou_threshold: float = 0.80
         cross_class_score_diff_threshold: float = 0.80  # Score difference ratio for cross-class dedup
-        
-        # Advanced deduplication and merging options
-        cross_class_suppression: bool = False  # Enable cross-class NMS
-        cross_class_iou_threshold: float = 0.75  # IoU threshold for cross-class suppression
         enable_group_merge: bool = False  # Enable semantic grouping and merging
         merge_mask_iou_threshold: float = 0.80  # IoU threshold for mask-based merging
         merge_box_iou_threshold: float = 0.90  # IoU threshold for box-based merging
@@ -235,12 +238,20 @@ except Exception as _exc:
         display_legend: bool = False
         seg_fill_alpha: float = 0.25
         bbox_linewidth: float = 2.0
-        obj_fontsize_inside: int = 9
-        obj_fontsize_outside: int = 10
-        rel_fontsize: int = 8
+        obj_fontsize_inside: int = 14
+        obj_fontsize_outside: int = 14
+        rel_fontsize: int = 12
         legend_fontsize: int = 8
         rel_arrow_linewidth: float = 2.0
         rel_arrow_mutation_scale: float = 26.0
+        auto_scale_styles: bool = True
+        style_ref_px: int = 1000
+        style_scale_min: float = 0.5
+        style_scale_max: float = 2.0
+        obj_fontsize_inside_min: int = 10
+        obj_fontsize_outside_min: int = 10
+        rel_fontsize_min: int = 9
+        render_variants: Dict[str, Dict[str, Any]] = field(default_factory=dict)
         resolve_overlaps: bool = True
         show_bboxes: bool = True
         show_confidence: bool = False
@@ -266,17 +277,193 @@ except Exception as _exc:
         preproc_device: Optional[str] = None
         # If True, always run full preprocessing per question (ignore detection cache)
         force_preprocess_per_question: bool = False
+        resume_existing_outputs: bool = False
 
         # color tweaks
         color_sat_boost: float = 1.1
         color_val_boost: float = 1.1
 
 
-def default_config(**overrides: Any) -> PreprocessorConfig:
+_LEGACY_PROFILE = {
+    "profile": "paper_legacy",
+    "targeted_open_vocabulary": False,
+    "singleton_filtering_enabled": True,
+    "quality_question_pruning": False,
+    "render_question_relations_only": False,
+    "min_relations_per_object": 1,
+    "fill_segmentation": True,
+    "seg_fill_alpha": 0.25,
+    "show_bboxes": True,
+    "obj_fontsize_inside": 9,
+    "obj_fontsize_outside": 10,
+    "rel_fontsize": 8,
+}
+
+
+PAPER_TABLE2_RENDER_VARIANTS = {
+    "segmented": {
+        "display_labels": False,
+        "display_relationships": False,
+        "display_relation_labels": False,
+    },
+    "som_numeric": {
+        "label_mode": "numeric",
+        "display_labels": True,
+        "display_relationships": False,
+        "display_relation_labels": False,
+    },
+    "gom_text_unlabeled": {
+        "label_mode": "original",
+        "display_labels": True,
+        "display_relationships": True,
+        "display_relation_labels": False,
+    },
+    "gom_numeric_unlabeled": {
+        "label_mode": "numeric",
+        "display_labels": True,
+        "display_relationships": True,
+        "display_relation_labels": False,
+    },
+    "gom_text_labeled": {
+        "label_mode": "original",
+        "display_labels": True,
+        "display_relationships": True,
+        "display_relation_labels": True,
+    },
+    "gom_numeric_labeled": {
+        "label_mode": "numeric",
+        "display_labels": True,
+        "display_relationships": True,
+        "display_relation_labels": True,
+    },
+}
+
+
+_PAPER_AAAI26_PROFILE = {
+    "profile": "paper_aaai26",
+    "relation_selection_policy": "paper_algorithm",
+    "targeted_open_vocabulary": False,
+    "singleton_filtering_enabled": False,
+    "quality_question_pruning": False,
+    "render_question_relations_only": False,
+    "aggressive_pruning": False,
+    "use_clip_semantic_pruning": False,
+    "context_expansion_enabled": False,
+    "false_negative_reduction": False,
+    "threshold_owl": 0.50,
+    "owl_model_revision": "2a1560802f8cf3c408fec9b809d705f56a2f7146",
+    "threshold_yolo": 0.50,
+    "threshold_detectron": 0.50,
+    "auto_detector_thresholds": False,
+    "wbf_iou_threshold": 0.90,
+    "ensemble_detector_weights": {
+        "owlvit": 2.0,
+        "yolov8": 1.5,
+        "detectron2": 1.0,
+    },
+    "paper_faithful_fusion": False,
+    "apply_label_nms": True,
+    "cross_class_suppression": False,
+    "enable_group_merge": False,
+    "enable_semantic_dedup": False,
+    "same_class_iou_threshold": 0.50,
+    "same_class_mask_iou_threshold": 0.80,
+    "enable_containment_removal": True,
+    "enable_mask_quality_filter": False,
+    "post_segmentation_dedup": True,
+    "detection_cross_class_suppression_enabled": False,
+    "detection_mask_merge_enabled": False,
+    "use_spatial_fusion": False,
+    "use_hierarchical_fusion": False,
+    "detection_resize": False,
+    "max_detections_total": 0,
+    "max_detections_per_label": 0,
+    "max_objects_per_question": 0,
+    "max_picture_area_ratio": 1.1,
+    "sam_version": "hq",
+    "sam_hq_model_type": "vit_h",
+    "skip_depth_when_unused": False,
+    "max_relations_per_object": 3,
+    "min_relations_per_object": 0,
+    "margin": 20,
+    "paper_direction_margin": 20.0,
+    "paper_depth_threshold": 0.10,
+    "paper_near_threshold": 5000.0,
+    "paper_touching_iou_threshold": 0.10,
+    "paper_touching_gap_threshold": 3.0,
+    "paper_very_close_threshold": 0.05,
+    "paper_close_threshold": 0.12,
+    "paper_require_fasttext": True,
+    "threshold_object_similarity": 0.50,
+    "threshold_relation_similarity": 0.50,
+    "fill_segmentation": True,
+    "seg_fill_alpha": 0.25,
+    "show_bboxes": False,
+    "obj_fontsize_inside": 9,
+    "obj_fontsize_outside": 10,
+    "rel_fontsize": 8,
+    # Dense relation graphs need room for the collision resolver to separate
+    # labels; the previous 20 px cap forced long labels back onto each other.
+    "relation_label_offset_px": 14.0,
+    "relation_label_max_dist_px": 50.0,
+    "bbox_linewidth": 1.8,
+    "rel_arrow_linewidth": 2.0,
+    "rel_arrow_mutation_scale": 12.0,
+    "label_bbox_linewidth": 1.0,
+    "relation_label_bbox_linewidth": 1.0,
+    "color_sat_boost": 1.0,
+    "color_val_boost": 1.0,
+    "auto_scale_styles": False,
+    "filter_redundant_relations": False,
+    "cap_relations_per_object": False,
+    "render_variants": PAPER_TABLE2_RENDER_VARIANTS,
+}
+
+
+PAPER_AAAI26_LOCKED_FIELDS = {
+    key: value
+    for key, value in _PAPER_AAAI26_PROFILE.items()
+    if key not in {"render_variants", "profile"}
+}
+
+
+def validate_paper_config(cfg: PreprocessorConfig) -> None:
+    """Reject silent drift in the immutable paper-declared profile."""
+    if getattr(cfg, "profile", None) != "paper_aaai26":
+        return
+    mismatches = {
+        key: (getattr(cfg, key, None), expected)
+        for key, expected in PAPER_AAAI26_LOCKED_FIELDS.items()
+        if getattr(cfg, key, None) != expected
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}={actual!r} (expected {expected!r})"
+            for key, (actual, expected) in sorted(mismatches.items())
+        )
+        raise ValueError(f"paper_aaai26 configuration drift: {details}")
+
+
+def default_config(profile: str = "quality_vqa", **overrides: Any) -> PreprocessorConfig:
     """
     Create a PreprocessorConfig with sensible defaults and optional overrides.
     """
+    if profile not in {"quality_vqa", "paper_legacy", "paper_aaai26"}:
+        raise ValueError(
+            "profile must be 'quality_vqa', 'paper_legacy', or 'paper_aaai26'"
+        )
     cfg = PreprocessorConfig()
+    cfg.profile = profile
+    if profile == "paper_legacy":
+        import copy
+
+        for key, value in _LEGACY_PROFILE.items():
+            setattr(cfg, key, copy.deepcopy(value))
+    elif profile == "paper_aaai26":
+        import copy
+
+        for key, value in _PAPER_AAAI26_PROFILE.items():
+            setattr(cfg, key, copy.deepcopy(value))
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg

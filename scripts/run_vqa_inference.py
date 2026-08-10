@@ -9,14 +9,28 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
+# Load .env (HF_HOME, HF_TOKEN, ...) before importing vllm/torch so cache
+# and auth environment variables take effect.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+try:
+    from gom.utils.env import load_dotenv
+
+    load_dotenv(_REPO_ROOT / ".env" if (_REPO_ROOT / ".env").is_file() else None)
+except Exception:
+    pass
+
 from vllm import LLM, SamplingParams
+from gom.vqa.prompts import PROMPT_PROFILES, build_vqa_prompt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
+# Prompt templates verbatim from the AAAI26 supplementary (Fig 1 / Fig 2).
 SYSTEM_VISUAL = (
     "You are a multimodal assistant with spatial reasoning capabilities. "
     "Use the visual scene graph in the image to interpret spatial relations "
@@ -41,6 +55,11 @@ USER_VISUAL_TEXTUAL = (
     "Question: {question}"
 )
 
+# Raw baseline: plain image + question (lmms-eval VQA convention: single word/phrase).
+SYSTEM_RAW = "You are a helpful visual assistant."
+
+USER_RAW = "Question: {question}\nAnswer the question using a single word or phrase."
+
 
 def load_dataset(path: str | Path) -> list[dict]:
     examples = []
@@ -56,15 +75,14 @@ def build_prompt(
     question: str,
     mode: str,
     scene_graph_text: Optional[str] = None,
+    profile: str = "paper_declared",
 ) -> tuple[str, str]:
-    if mode == "visual":
-        return SYSTEM_VISUAL, USER_VISUAL.format(question=question)
-    else:
-        if scene_graph_text is None:
-            raise ValueError("scene_graph_text required for visual_textual mode")
-        return SYSTEM_VISUAL_TEXTUAL, USER_VISUAL_TEXTUAL.format(
-            scene_graph=scene_graph_text, question=question
-        )
+    return build_vqa_prompt(
+        mode,
+        question,
+        scene_graph=scene_graph_text,
+        profile=profile,
+    )
 
 
 def format_messages(system: str, user: str, image_path: str) -> list[dict]:
@@ -86,11 +104,16 @@ def run_inference(
     image_dir: Optional[str],
     mode: str,
     sampling_params: SamplingParams,
+    prompt_profile: str = "paper_declared",
 ) -> list[dict]:
     results = []
 
     for i, ex in enumerate(examples):
-        image_path = ex.get("gom_image_path") or ex.get("image_path")
+        if mode == "raw":
+            # Baseline always uses the unprocessed image
+            image_path = ex.get("image_path") or ex.get("gom_image_path")
+        else:
+            image_path = ex.get("gom_image_path") or ex.get("image_path")
         full_path = Path(image_dir) / image_path if image_dir else Path(image_path)
 
         if not full_path.exists():
@@ -99,7 +122,12 @@ def run_inference(
 
         question = ex["question"]
         try:
-            system, user = build_prompt(question, mode, ex.get("scene_graph_text"))
+            system, user = build_prompt(
+                question,
+                mode,
+                ex.get("scene_graph_text"),
+                prompt_profile,
+            )
         except ValueError:
             continue
 
@@ -135,9 +163,14 @@ def main():
     parser.add_argument("--image-dir", default=None)
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-7B-Instruct")
-    parser.add_argument("--mode", choices=["visual", "visual_textual"], default="visual_textual")
-    parser.add_argument("--max-tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--mode", choices=["raw", "visual", "visual_textual"], default="visual_textual")
+    parser.add_argument(
+        "--prompt-profile", choices=PROMPT_PROFILES, default="paper_declared"
+    )
+    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.0)  # greedy: lmms-eval VQA standard
+    parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--limit", type=int, default=None)
@@ -152,10 +185,23 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         trust_remote_code=True,
+        seed=args.seed,
     )
-    sampling_params = SamplingParams(max_tokens=args.max_tokens, temperature=args.temperature)
+    sampling_params = SamplingParams(
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        seed=args.seed,
+    )
 
-    results = run_inference(llm, examples, args.image_dir, args.mode, sampling_params)
+    results = run_inference(
+        llm,
+        examples,
+        args.image_dir,
+        args.mode,
+        sampling_params,
+        args.prompt_profile,
+    )
     save_results(results, args.output)
 
     # Simple accuracy if ground truth available

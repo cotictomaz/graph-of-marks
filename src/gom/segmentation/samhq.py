@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -72,6 +73,7 @@ class SamHQSegmenter(Segmenter):
             torch.load = original_load
             
         self._predictor = SamPredictor(self._sam_model)
+        self._cached_image_key = None
 
         # autocast preferred on CUDA
         self._amp_enabled = (self.device == "cuda")
@@ -93,27 +95,33 @@ class SamHQSegmenter(Segmenter):
         H, W = image_np.shape[:2]
         boxes_xyxy = [self.clamp_box_xyxy(b, W, H) for b in boxes]
 
-        self._predictor.set_image(image_np)
-        try:
-            try:
-                results = self._segment_batched(image_np, boxes_xyxy, H, W)
-            except Exception as e:
-                print(f"[SAM-HQ] Batch failed, using sequential fallback: {e}")
-                results = self._segment_sequential(image_np, boxes_xyxy, H, W)
-
-            final: List[Dict[str, Any]] = []
-            for r in results:
-                mask = self.postprocess_mask(r["segmentation"].astype(bool))
-                final.append(
-                    {
-                        "segmentation": mask,
-                        "bbox": self.bbox_from_mask(mask),
-                        "predicted_iou": float(r.get("predicted_iou", 0.0)),
-                    }
-                )
-            return final
-        finally:
+        image_key = (
+            W,
+            H,
+            hashlib.blake2b(image_np.tobytes(), digest_size=12).digest(),
+        )
+        if image_key != self._cached_image_key:
             self._release_predictor_memory()
+            self._predictor.set_image(image_np)
+            self._cached_image_key = image_key
+
+        try:
+            results = self._segment_batched(image_np, boxes_xyxy, H, W)
+        except Exception as e:
+            print(f"[SAM-HQ] Batch failed, using sequential fallback: {e}")
+            results = self._segment_sequential(image_np, boxes_xyxy, H, W)
+
+        final: List[Dict[str, Any]] = []
+        for r in results:
+            mask = self.postprocess_mask(r["segmentation"].astype(bool))
+            final.append(
+                {
+                    "segmentation": mask,
+                    "bbox": self.bbox_from_mask(mask),
+                    "predicted_iou": float(r.get("predicted_iou", 0.0)),
+                }
+            )
+        return final
 
     # ----------------- internals -----------------
 
@@ -292,6 +300,7 @@ class SamHQSegmenter(Segmenter):
                     pass
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        self._cached_image_key = None
 
     def _resolve_checkpoint(self, checkpoint: Optional[str], model_type: str, auto_download: bool) -> Path:
         """

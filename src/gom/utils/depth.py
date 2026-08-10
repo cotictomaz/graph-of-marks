@@ -169,11 +169,12 @@ class DepthConfig:
         - vits requires ~100MB GPU memory
         - FP16 requires CUDA compute capability ≥ 7.0 (Volta+)
     """
-    model_name: str = "depth_anything_v2_vitl"   # Default to Depth Anything V2 Large (SOTA)
+    model_name: str = "DPT_Large"   # MiDaS DPT-Large; set depth_anything_v2_vitl to opt in to DA-V2
     device: Optional[str] = None
     fp16_on_cuda: bool = True
     cache_maps: bool = True
     use_depth_v2: bool = True
+    midas_repo: str = "isl-org/MiDaS:1645b7e1675301fdfac03640738fe5a6531e17d6"
 
 
 class DepthEstimator:
@@ -224,6 +225,7 @@ class DepthEstimator:
                 device=self.config.device,
                 fp16_on_cuda=self.config.fp16_on_cuda,
                 cache_maps=self.config.cache_maps,
+                midas_repo=self.config.midas_repo,
             )
             self._v2_estimator = DepthEstimatorV2(config=v2_config)
             # Expose V2 properties for compatibility
@@ -263,8 +265,8 @@ class DepthEstimator:
 
         self.device = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")  # type: ignore[attr-defined]
         # Load MiDaS model and its transforms (weights are cached by torch.hub)
-        self.model = torch.hub.load("intel-isl/MiDaS", self.config.model_name).to(self.device).eval()  # type: ignore[attr-defined]
-        transforms = torch.hub.load("intel-isl/MiDaS", "transforms")  # type: ignore[attr-defined]
+        self.model = torch.hub.load(self.config.midas_repo, self.config.model_name).to(self.device).eval()  # type: ignore[attr-defined]
+        transforms = torch.hub.load(self.config.midas_repo, "transforms")  # type: ignore[attr-defined]
         if self.config.model_name.lower().startswith("dpt"):
             self.transform = transforms.dpt_transform
         else:
@@ -303,7 +305,8 @@ class DepthEstimator:
             inp = self.transform(img_np).to(self.device)  # type: ignore[operator]
             pred = self.model(inp).squeeze().detach().cpu().numpy()  # type: ignore[operator]
 
-        # Normalize and invert: MiDaS larger = farther → invert so 1.0 = closer
+        # Normalize: MiDaS outputs disparity (larger = closer), so plain
+        # min-max already yields the 1.0 = closer convention. No inversion.
         pred = np.asarray(pred, dtype=np.float32)
         if not np.isfinite(pred).any():
             return None
@@ -312,7 +315,7 @@ class DepthEstimator:
         pmin, pmax = np.percentile(finite, [2.0, 98.0])
         rng = max(1e-6, float(pmax - pmin))
         norm = np.clip((pred - pmin) / rng, 0.0, 1.0)
-        return 1.0 - norm
+        return norm
 
     def relative_depth_at(self, image: Image.Image, centers: Sequence[Tuple[float, float]]) -> List[float]:
         """

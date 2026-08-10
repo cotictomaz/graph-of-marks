@@ -9,3 +9,11 @@
 **/output_images
 *.pt
 **/vqa_v2_val_data
+.git
+data_paper
+data_subsample
+original_versions
+paper_reference
+reproduction/data
+verification_output
+gom_intermediate_outputs

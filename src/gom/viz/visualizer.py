@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.patches as patches
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.transforms import Bbox
@@ -230,6 +231,9 @@ class VisualizerConfig:
     style_ref_dpi: int = 100  # Reference DPI
     style_scale_min: float = 0.5  # Minimum scale factor
     style_scale_max: float = 2.0  # Maximum scale factor
+    obj_fontsize_inside_min: int = 10
+    obj_fontsize_outside_min: int = 10
+    rel_fontsize_min: int = 9
 
 
 # ===============================================================
@@ -305,7 +309,7 @@ class Visualizer:
         save_path: Optional[str] = None,
         draw_background: bool = True,
         bg_color: Tuple[float, float, float, float] = (1, 1, 1, 0),
-        dpi: int = 800,
+        dpi: int = 100,
     ) -> Tuple[plt.Figure, plt.Axes]:
         """
         Main entry point for rendering complete scene visualization.
@@ -352,10 +356,6 @@ class Visualizer:
         # Auto-scale fonts/arrows based on image size and resolution.
         restore_cfg = None
         if self.cfg.auto_scale_styles:
-            W, H = image.size
-            scale = max(W, H) / float(self.cfg.style_ref_px)
-            scale *= float(dpi) / float(self.cfg.style_ref_dpi)
-            scale = max(self.cfg.style_scale_min, min(self.cfg.style_scale_max, scale))
             restore_cfg = {
                 "obj_fontsize_inside": self.cfg.obj_fontsize_inside,
                 "obj_fontsize_outside": self.cfg.obj_fontsize_outside,
@@ -364,12 +364,8 @@ class Visualizer:
                 "rel_arrow_linewidth": self.cfg.rel_arrow_linewidth,
                 "rel_arrow_mutation_scale": self.cfg.rel_arrow_mutation_scale,
             }
-            self.cfg.obj_fontsize_inside = max(8, int(round(self.cfg.obj_fontsize_inside * scale)))
-            self.cfg.obj_fontsize_outside = max(8, int(round(self.cfg.obj_fontsize_outside * scale)))
-            self.cfg.rel_fontsize = max(6, int(round(self.cfg.rel_fontsize * scale)))
-            self.cfg.legend_fontsize = max(6, int(round(self.cfg.legend_fontsize * scale)))
-            self.cfg.rel_arrow_linewidth = max(0.5, float(self.cfg.rel_arrow_linewidth * scale))
-            self.cfg.rel_arrow_mutation_scale = max(8.0, float(self.cfg.rel_arrow_mutation_scale * scale))
+            for key, value in self.effective_style(image.size).items():
+                setattr(self.cfg, key, value)
         
         # Assign colors first (needed for all rendering paths)
         colors = self._assign_colors(labels)
@@ -523,7 +519,9 @@ class Visualizer:
         """
         W, H = image.size
         
-        fig, ax = plt.subplots(figsize=(W / 100, H / 100))
+        fig, ax = plt.subplots(figsize=(W / 100, H / 100), dpi=100)
+        fig._gom_pixel_size = (W, H)  # type: ignore[attr-defined]
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
         ax.axis("off")
         if draw_background:
             ax.imshow(image)
@@ -559,16 +557,19 @@ class Visualizer:
             - SVG gets additional 'facecolor=none' for proper transparency
             - Figure auto-closed after saving to free memory
         """
-        fig.tight_layout()
         if save_path:
             # Determine if we need transparency
             is_transparent = not draw_background and (len(bg_color) == 4 and bg_color[3] == 0)
             
             # For SVG, also set facecolor to 'none' for true transparency
+            pixel_size = getattr(fig, "_gom_pixel_size", None)
+            if pixel_size:
+                fig.set_size_inches(pixel_size[0] / float(dpi), pixel_size[1] / float(dpi))
             kwargs = {
-                'bbox_inches': 'tight',
+                'bbox_inches': None,
                 'transparent': is_transparent,
                 'dpi': dpi,
+                'pad_inches': 0,
             }
             
             if save_path.endswith('.svg') and is_transparent:
@@ -576,6 +577,13 @@ class Visualizer:
             
             fig.savefig(save_path, **kwargs)
             plt.close(fig)
+            if pixel_size and not str(save_path).lower().endswith(".svg"):
+                with Image.open(save_path) as rendered:
+                    if rendered.size != tuple(pixel_size):
+                        corrected = rendered.resize(
+                            tuple(pixel_size), getattr(Image, "Resampling", Image).LANCZOS
+                        )
+                        corrected.save(save_path)
         else:
             plt.show()
 
@@ -600,7 +608,16 @@ class Visualizer:
             - Capping limits visual clutter by restricting relationships per object
             - Both operations controlled by VisualizerConfig flags
         """
-        rels = list(relationships)
+        safe_relations = {
+            "above", "below", "left_of", "right_of", "on_top_of",
+            "in_front_of", "behind", "next_to", "near", "far_from",
+            "inside", "outside", "touching", "holding", "wearing",
+            "overlapping", "contains",
+        }
+        rels = [
+            relation for relation in relationships
+            if str(relation.get("relation", "")).strip().lower() in safe_relations
+        ]
         if self.cfg.filter_redundant_relations:
             rels = self._filter_redundant_relations(rels)
         if self.cfg.cap_relations_per_object:
@@ -724,13 +741,14 @@ class Visualizer:
             except Exception:
                 bg_np = None
 
-            blended = VectorizedMaskRenderer.blend_multiple_masks(
-                masks=masks_list,
-                colors=colors_list,
-                background=bg_np,
-                alpha=cfg.seg_fill_alpha,
-            )
-            ax.imshow(blended, extent=(0, blended.shape[1], blended.shape[0], 0), zorder=1)
+            if cfg.fill_segmentation:
+                blended = VectorizedMaskRenderer.blend_multiple_masks(
+                    masks=masks_list,
+                    colors=colors_list,
+                    background=bg_np,
+                    alpha=cfg.seg_fill_alpha,
+                )
+                ax.imshow(blended, extent=(0, blended.shape[1], blended.shape[0], 0), zorder=1)
 
             # Draw contours or bbox outlines for each object on top of blended masks
             for (original_idx, box, depth) in ordered:
@@ -804,12 +822,13 @@ class Visualizer:
             - Skips degenerate contours (< 3 points)
         """
         # Use seg_fill_alpha from config (respects user setting)
-        alpha_to_use = self.cfg.seg_fill_alpha
+        alpha_to_use = self.cfg.seg_fill_alpha if self.cfg.fill_segmentation else 0.0
         
         if cv2 is None:
-            # Fallback rendering without contours
-            ax.imshow(mask.astype(float), alpha=alpha_to_use, extent=(0, mask.shape[1], mask.shape[0], 0), 
-                     cmap='Greys', vmin=0, vmax=1)
+            if self.cfg.fill_segmentation:
+                ax.imshow(mask.astype(float), alpha=alpha_to_use, extent=(0, mask.shape[1], mask.shape[0], 0),
+                         cmap='Greys', vmin=0, vmax=1)
+            ax.contour(mask.astype(bool), levels=[0.5], colors=[color], linewidths=[linewidth], zorder=zorder)
             return
 
         # Ensure mask is uint8 with 0-255 range
@@ -826,7 +845,8 @@ class Visualizer:
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
             # Fill mask region with transparency
-            ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=alpha_to_use, zorder=zorder)
+            if self.cfg.fill_segmentation:
+                ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=alpha_to_use, zorder=zorder)
             # Draw opaque border for definition
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=1.0, zorder=zorder + 0.1)
 
@@ -896,7 +916,9 @@ class Visualizer:
                 continue
 
             start, end = centers[src], centers[tgt]
-            relation_name = str(rel.get("relation", "")).lower()
+            relation_name = str(
+                rel.get("display_relation") or rel.get("relation", "")
+            ).lower()
             color = colors[src]
 
             # Adjust curvature for multiple arrows between same objects
@@ -914,7 +936,16 @@ class Visualizer:
                 linewidth=cfg.rel_arrow_linewidth,
                 connectionstyle=f"arc3,rad={curvature}",
                 mutation_scale=cfg.rel_arrow_mutation_scale,
-                zorder=4,
+                zorder=8,
+            )
+            arrow.set_path_effects(
+                [
+                    path_effects.Stroke(
+                        linewidth=cfg.rel_arrow_linewidth + 2.5,
+                        foreground="white",
+                    ),
+                    path_effects.Normal(),
+                ]
             )
             ax.add_patch(arrow)
             arrow_patches.append(arrow)
@@ -925,7 +956,7 @@ class Visualizer:
                 pos = self._get_optimal_relation_label_position(ax, arrow, readable)
                 # Offset labels along the arrow normal to reduce collisions.
                 count = arrow_counts[(src, tgt)] - 1
-                if cfg.relation_label_offset_px and count > 0:
+                if cfg.relation_label_offset_px:
                     try:
                         to_px = ax.transData.transform
                         to_data = ax.transData.inverted().transform
@@ -957,13 +988,21 @@ class Visualizer:
                         edgecolor=color,
                         linewidth=cfg.relation_label_bbox_linewidth,
                     ),
-                    zorder=5,
+                    zorder=9,
+                )
+                pos = self._nudge_relation_label_clear(
+                    ax,
+                    t,
+                    pos,
+                    p0,
+                    p1,
+                    fixed_texts=[*object_texts, *rel_texts],
                 )
                 try:
                     arrow_len_px = self._get_arrow_length_px(ax, arrow)
                     max_dist = min(
                         float(cfg.relation_label_max_dist_px),
-                        max(12.0, arrow_len_px * 0.4),
+                        max(40.0, arrow_len_px * 0.6),
                     )
                     t._gom_max_dist_px = max_dist
                 except Exception:
@@ -1440,7 +1479,9 @@ class Visualizer:
         W, H = image.size
         
         # Create figure with transparent background
-        fig, ax = plt.subplots(figsize=(W / 100, H / 100))
+        fig, ax = plt.subplots(figsize=(W / 100, H / 100), dpi=100)
+        fig._gom_pixel_size = (W, H)  # type: ignore[attr-defined]
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
         ax.axis("off")
         ax.set_xlim(0, W)
         ax.set_ylim(H, 0)
@@ -1471,11 +1512,11 @@ class Visualizer:
             obj_texts = self._draw_labels(ax, boxes, labels, scores, masks, colors, image, avoid_objects=avoid_objects)
         
         # Save
-        fig.tight_layout()
         if save_path:
             is_transparent = len(bg_color) == 4 and bg_color[3] == 0
+            fig.set_size_inches(W / float(dpi), H / float(dpi))
             kwargs = {
-                'bbox_inches': 'tight',
+                'bbox_inches': None,
                 'transparent': is_transparent,
                 'dpi': dpi,
                 'pad_inches': 0,
@@ -1486,6 +1527,13 @@ class Visualizer:
             
             fig.savefig(save_path, **kwargs)
             plt.close(fig)
+            if not str(save_path).lower().endswith(".svg"):
+                with Image.open(save_path) as rendered:
+                    if rendered.size != (W, H):
+                        corrected = rendered.resize(
+                            (W, H), getattr(Image, "Resampling", Image).LANCZOS
+                        )
+                        corrected.save(save_path)
         else:
             plt.show()
             
@@ -1824,6 +1872,102 @@ class Visualizer:
     # ===========================================================
     # RELATION LABEL GEOMETRY
     # ===========================================================
+    def _nudge_relation_label_clear(
+        self,
+        ax,
+        text_obj,
+        anchor: Tuple[float, float],
+        p0: Tuple[float, float],
+        p1: Tuple[float, float],
+        *,
+        fixed_texts: Sequence[Any],
+    ) -> Tuple[float, float]:
+        """Place a relation label near its arrow without touching visible label boxes."""
+        if not fixed_texts:
+            return anchor
+
+        try:
+            fig = ax.figure
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            to_px = ax.transData.transform
+            to_data = ax.transData.inverted().transform
+
+            def visible_bbox(obj):
+                patch = obj.get_bbox_patch()
+                if patch is not None:
+                    return patch.get_window_extent(renderer=renderer).expanded(1.04, 1.08)
+                return obj.get_window_extent(renderer=renderer).expanded(1.08, 1.12)
+
+            obstacles = [visible_bbox(obj) for obj in fixed_texts]
+            axes_bb = ax.get_window_extent(renderer=renderer)
+            label_bb = visible_bbox(text_obj)
+            label_width = float(label_bb.width)
+            label_height = float(label_bb.height)
+            start_px = np.asarray(to_px(p0), dtype=float)
+            end_px = np.asarray(to_px(p1), dtype=float)
+            tangent = end_px - start_px
+            tangent_norm = float(np.linalg.norm(tangent))
+            if tangent_norm < 1e-6:
+                return anchor
+            tangent /= tangent_norm
+            normal = np.array([-tangent[1], tangent[0]])
+            directions = [
+                tangent,
+                -tangent,
+                normal,
+                -normal,
+                tangent + normal,
+                tangent - normal,
+                -tangent + normal,
+                -tangent - normal,
+            ]
+            base_px = np.asarray(to_px(anchor), dtype=float)
+            candidates = [base_px]
+            for distance in (16.0, 28.0, 40.0, 56.0):
+                for direction in directions:
+                    direction = direction / (np.linalg.norm(direction) + 1e-9)
+                    candidates.append(base_px + direction * distance)
+
+            best_score = None
+            best_pos = anchor
+            for candidate_px in candidates:
+                candidate = tuple(to_data(candidate_px))
+                bb = Bbox.from_bounds(
+                    candidate_px[0] - label_width / 2.0,
+                    candidate_px[1] - label_height / 2.0,
+                    label_width,
+                    label_height,
+                )
+                overlap_area = 0.0
+                overlap_count = 0
+                for obstacle in obstacles:
+                    if not bb.overlaps(obstacle):
+                        continue
+                    overlap_count += 1
+                    overlap_area += max(0.0, min(bb.x1, obstacle.x1) - max(bb.x0, obstacle.x0)) * max(
+                        0.0, min(bb.y1, obstacle.y1) - max(bb.y0, obstacle.y0)
+                    )
+                outside = (
+                    max(0.0, axes_bb.x0 - bb.x0)
+                    + max(0.0, bb.x1 - axes_bb.x1)
+                    + max(0.0, axes_bb.y0 - bb.y0)
+                    + max(0.0, bb.y1 - axes_bb.y1)
+                )
+                distance = float(np.linalg.norm(candidate_px - base_px))
+                score = (overlap_count, overlap_area, outside, distance)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_pos = candidate
+                    if overlap_count == 0 and outside == 0 and distance == 0:
+                        break
+
+            text_obj.set_position(best_pos)
+            return best_pos
+        except Exception:
+            text_obj.set_position(anchor)
+            return anchor
+
     def _get_optimal_relation_label_position(self, ax, arrow, text: str) -> Tuple[float, float]:
         """
         Put the relation label on the arrow path, near the midpoint.
@@ -2340,23 +2484,24 @@ class Visualizer:
             - Repulsive forces push labels away from overlaps
             - Converges to locally optimal non-overlapping layout
         """
-        if adjust_text is None or not movable_texts:
+        if not movable_texts:
             return
 
         prof = self._profile_params()
 
-        adjust_text(
-            movable_texts,
-            x=[p[0] for p in movable_anchors],
-            y=[p[1] for p in movable_anchors],
-            ax=ax,
-            only_move={"points": "xy", "text": "xy"},
-            force_text=prof["force_text"],
-            expand_text=prof["expand_text"],
-            expand_points=prof["expand_points"],
-            expand_objects=prof["expand_objects"],
-            add_objects=list(arrows) + list(fixed_texts),
-        )
+        if adjust_text is not None:
+            adjust_text(
+                movable_texts,
+                x=[p[0] for p in movable_anchors],
+                y=[p[1] for p in movable_anchors],
+                ax=ax,
+                only_move={"points": "xy", "text": "xy"},
+                force_text=prof["force_text"],
+                expand_text=prof["expand_text"],
+                expand_points=prof["expand_points"],
+                expand_objects=prof["expand_objects"],
+                add_objects=list(arrows) + list(fixed_texts),
+            )
 
         fig = ax.figure
         fig.canvas.draw()
@@ -2380,9 +2525,40 @@ class Visualizer:
                         movable_texts[j].set_position((xj + dx * 0.5, yj + dy * 0.5))
                         moved = True
 
+                for fixed_bb in fix_bbs:
+                    moving_bb = mov_bbs[i]
+                    if not moving_bb.overlaps(fixed_bb):
+                        continue
+                    overlap_x = min(moving_bb.x1, fixed_bb.x1) - max(
+                        moving_bb.x0, fixed_bb.x0
+                    )
+                    overlap_y = min(moving_bb.y1, fixed_bb.y1) - max(
+                        moving_bb.y0, fixed_bb.y0
+                    )
+                    if overlap_x <= 0 or overlap_y <= 0:
+                        continue
+                    moving_cx = (moving_bb.x0 + moving_bb.x1) * 0.5
+                    moving_cy = (moving_bb.y0 + moving_bb.y1) * 0.5
+                    fixed_cx = (fixed_bb.x0 + fixed_bb.x1) * 0.5
+                    fixed_cy = (fixed_bb.y0 + fixed_bb.y1) * 0.5
+                    if overlap_x < overlap_y:
+                        dx_px = (overlap_x + 3.0) * (
+                            -1.0 if moving_cx <= fixed_cx else 1.0
+                        )
+                        dy_px = 0.0
+                    else:
+                        dx_px = 0.0
+                        dy_px = (overlap_y + 3.0) * (
+                            -1.0 if moving_cy <= fixed_cy else 1.0
+                        )
+                    dx, dy = self._pixels_to_data(ax, dx_px, dy_px)
+                    x, y = movable_texts[i].get_position()
+                    movable_texts[i].set_position((x + dx, y + dy))
+                    moved = True
+
             if not moved:
                 break
-            fig.canvas.draw_idle()
+            fig.canvas.draw()
 
     # ===========================================================
     # SMALL GEOM UTILS
@@ -2835,3 +3011,45 @@ class Visualizer:
             import re as _re
             s = _re.sub(r"(?<!^)(?=[A-Z])", " ", s)
         return s.replace("_", " ").strip().title()
+    def effective_style(self, image_size: Tuple[int, int]) -> Dict[str, float]:
+        """Return the style values that will actually be used for an image."""
+        values: Dict[str, float] = {
+            "obj_fontsize_inside": self.cfg.obj_fontsize_inside,
+            "obj_fontsize_outside": self.cfg.obj_fontsize_outside,
+            "rel_fontsize": self.cfg.rel_fontsize,
+            "legend_fontsize": self.cfg.legend_fontsize,
+            "rel_arrow_linewidth": self.cfg.rel_arrow_linewidth,
+            "rel_arrow_mutation_scale": self.cfg.rel_arrow_mutation_scale,
+        }
+        if not self.cfg.auto_scale_styles:
+            return values
+
+        width, height = image_size
+        scale = max(width, height) / float(self.cfg.style_ref_px)
+        scale = max(self.cfg.style_scale_min, min(self.cfg.style_scale_max, scale))
+        values.update(
+            {
+                "obj_fontsize_inside": max(
+                    self.cfg.obj_fontsize_inside_min,
+                    int(round(self.cfg.obj_fontsize_inside * scale)),
+                ),
+                "obj_fontsize_outside": max(
+                    self.cfg.obj_fontsize_outside_min,
+                    int(round(self.cfg.obj_fontsize_outside * scale)),
+                ),
+                "rel_fontsize": max(
+                    self.cfg.rel_fontsize_min,
+                    int(round(self.cfg.rel_fontsize * scale)),
+                ),
+                "legend_fontsize": max(
+                    6, int(round(self.cfg.legend_fontsize * scale))
+                ),
+                "rel_arrow_linewidth": max(
+                    2.0, float(self.cfg.rel_arrow_linewidth * scale)
+                ),
+                "rel_arrow_mutation_scale": max(
+                    8.0, float(self.cfg.rel_arrow_mutation_scale * scale)
+                ),
+            }
+        )
+        return values

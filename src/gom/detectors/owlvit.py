@@ -182,6 +182,7 @@ class OwlViTDetector(Detector):
         self,
         *,
         model_name: str = "google/owlv2-base-patch16",
+        revision: Optional[str] = None,
         queries: Optional[Sequence[str]] = None,
         device: Optional[str] = None,
         score_threshold: float = 0.4,
@@ -192,16 +193,20 @@ class OwlViTDetector(Detector):
         super().__init__(name="owlvit", device=device, score_threshold=score_threshold)
 
         self.model_name = model_name
+        self.revision = revision
         self.queries: Sequence[str] = list(queries) if queries is not None else list(_DEFAULT_QUERIES)
         self.tta_hflip = bool(tta_hflip)
 
         # Processor + model
-        self.processor = Owlv2Processor.from_pretrained(model_name)
+        self.processor = Owlv2Processor.from_pretrained(
+            model_name, revision=revision
+        )
 
         # Dtype chosen based on device and fp16 flag
         dtype = torch.float16 if (fp16 and str(self.device).startswith("cuda") and torch.cuda.is_available()) else torch.float32
         self.model = Owlv2ForObjectDetection.from_pretrained(
             model_name,
+            revision=revision,
             torch_dtype=dtype,
             low_cpu_mem_usage=low_cpu_mem_usage,
         ).to(self.device)
@@ -329,8 +334,29 @@ class OwlViTDetector(Detector):
         if not images:
             return []
 
-        # Prepare batch: repeat the same queries for each image
-        batch_text = [self.queries] * len(images)
+        return self.detect_batch_with_queries(images, [self.queries] * len(images))
+
+    def detect_with_queries(
+        self, image: Image.Image, queries: Sequence[str]
+    ) -> List[Detection]:
+        """Run one inference with per-call queries without mutating detector state."""
+        results = self.detect_batch_with_queries([image], [queries])
+        return results[0] if results else []
+
+    def detect_batch_with_queries(
+        self,
+        images: Sequence[Image.Image],
+        queries_per_image: Sequence[Sequence[str]],
+    ) -> List[List[Detection]]:
+        """Run batched inference with a distinct controlled query set per image."""
+        if not images:
+            return []
+        if len(images) != len(queries_per_image):
+            raise ValueError("queries_per_image must have one entry per image")
+
+        batch_text = [list(queries) for queries in queries_per_image]
+        if any(not queries for queries in batch_text):
+            raise ValueError("OWL-ViT query lists must not be empty")
 
         encoding = self.processor(
             images=list(images),
@@ -357,14 +383,14 @@ class OwlViTDetector(Detector):
         )
 
         all_dets: List[List[Detection]] = []
-        for res in results:
+        for image_idx, res in enumerate(results):
             boxes_t = res.get("boxes", torch.empty(0, 4)).detach().cpu()
             scores_t = res.get("scores", torch.empty(0)).detach().cpu()
             labels_t = res.get("labels", torch.empty(0, dtype=torch.long)).detach().cpu()
 
             dets: List[Detection] = []
             for box, score, lab_idx in zip(boxes_t.tolist(), scores_t.tolist(), labels_t.tolist()):
-                label = self._safe_label(lab_idx)
+                label = self._safe_label(lab_idx, batch_text[image_idx])
                 dets.append(self._make_detection(box, label, float(score)))
             all_dets.append(dets)
 
@@ -434,10 +460,10 @@ class OwlViTDetector(Detector):
 
         return dets
 
-    def _safe_label(self, idx: int) -> str:
+    def _safe_label(self, idx: int, queries: Optional[Sequence[str]] = None) -> str:
         """Safely resolve query index to label string."""
         try:
-            return str(self.queries[idx])
+            return str((queries if queries is not None else self.queries)[idx])
         except Exception:
             return str(idx)
 

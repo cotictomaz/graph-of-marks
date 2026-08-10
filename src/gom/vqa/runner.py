@@ -44,17 +44,16 @@ Performance (VQAv2 validation, 10K examples):
 Usage:
     >>> from gom.vqa.runner import run_vqa
     >>> from gom.vqa.types import VQAExample
-    >>> from gom.vqa.models import HFVLModel
-    
+
     # Load examples
     >>> examples = [
     ...     VQAExample(image_path="img1.jpg", question="What color is the car?", question_id=1),
     ...     VQAExample(image_path="img1.jpg", question="How many people?", question_id=2),
     ...     VQAExample(image_path="img2.jpg", question="What's in the background?", question_id=3),
     ... ]
-    
-    # Initialize model
-    >>> model = HFVLModel("llava-hf/llava-1.5-7b-hf")
+
+    # Initialize any model wrapper exposing generate(prompt, image_path) -> str
+    >>> model = MyVLMWrapper("llava-hf/llava-1.5-7b-hf")
     
     # Run VQA
     >>> results = run_vqa(
@@ -257,7 +256,6 @@ from typing import Any, Dict, List, Optional, Union
 import psutil
 import torch
 
-from .models import HFVLModel, VLLMWrapper
 from .preproc import (
     get_preprocessed_path,
     get_scene_graph_path,
@@ -266,8 +264,9 @@ from .preproc import (
 )
 from .types import VQAExample
 
-# Both wrappers expose: generate(prompt: str, image_path: Optional[str]) -> str
-ModelLike = Union[VLLMWrapper, HFVLModel]
+# Any model wrapper exposing: generate(prompt: str, image_path: Optional[str]) -> str
+# (inference backends are intentionally not bundled with the library; see gom.vqa.models)
+ModelLike = Any
 
 
 def _should_clear_gpu_cache() -> bool:

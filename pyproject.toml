@@ -140,6 +140,7 @@ gom-vqa = "gom.cli.vqa:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = ["image_preprocessor", "vqa"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

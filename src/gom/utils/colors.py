@@ -44,7 +44,7 @@ Usage:
 from __future__ import annotations
 
 import colorsys
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 try:
     import matplotlib.colors as mcolors
@@ -310,6 +310,30 @@ def canonical_label(label: str) -> str:
         # Add more domain-specific mappings here as needed.
     }
     return CANONICAL_MAP.get(lb, lb)
+
+
+def color_for_label(
+    label: str,
+    idx: int = 0,
+    sat_boost: float = 1.0,
+    val_boost: float = 1.0,
+    cache: Optional[dict] = None,
+) -> str:
+    """Assign the original GoM golden-ratio class color deterministically."""
+    import colorsys
+
+    target = cache if cache is not None else {}
+    base = base_label(label).lower()
+    if base in target:
+        return str(target[base])
+    class_index = len(target) if cache is not None else max(0, int(idx))
+    hue = ((class_index + 1) * 0.61803398875) % 1.0
+    saturation = min(1.0, 0.9 * float(sat_boost))
+    value = min(1.0, 1.0 * float(val_boost))
+    rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+    color = "#%02x%02x%02x" % tuple(round(channel * 255) for channel in rgb)
+    target[base] = color
+    return color
 
 
 class ColorCycler:

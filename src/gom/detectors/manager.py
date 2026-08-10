@@ -1073,11 +1073,7 @@ class DetectorManager:
         import time
         t0 = time.monotonic()
         try:
-            if det.supports_batch:
-                out = det.detect_batch(list(images))
-            else:
-                # fallback: call detect_batch from base which parallelizes internally
-                out = det.detect_batch(list(images))
+            out = det.run_batch(list(images))
             return out
         except Exception:
             logger.exception("Detector %s failed in _run_detector_batch", det)
@@ -1252,4 +1248,3 @@ class DetectorManager:
 
 
 __all__ = ["DetectorManager"]
-

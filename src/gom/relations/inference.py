@@ -225,14 +225,14 @@ class RelationsConfig:
     min_relations_per_object: int = 1
     relationship_types: tuple = ("spatial", "semantic", "action")
     confidence_threshold: float = 0.5
-    use_clip_relations: bool = True
+    # CLIP-scored relations are opt-in; the default pipeline is geometric+depth only.
+    use_clip_relations: bool = False
     use_geometric_relations: bool = True
-    # OPTIMIZED: Raised from 0.23 to 0.30 to reduce false positives by ~20-30%
     clip_threshold: float = 0.5
     margin_px: int = 20
     min_distance: float = 5.0
     max_distance: float = 20000.0
-    depth_front_threshold: float = 0.05
+    depth_front_threshold: float = 0.1
     depth_touching_threshold: float = 0.08
     min_relation_distance: float = 5.0
     max_relation_distance: float = 20000.0
@@ -257,9 +257,9 @@ class RelationsConfig:
     depth_threshold: float = 0.1
     use_occlusion: bool = True
     
-    # SOTA: Physics-informed filtering (ENABLED for better reliability)
+    # SOTA: Physics-informed filtering (opt-in)
     # Filters impossible relations like "sofa on_top_of book"
-    use_physics_filtering: bool = True
+    use_physics_filtering: bool = False
     filter_impossible: bool = True
     check_support: bool = True
     check_stability: bool = True
@@ -283,7 +283,7 @@ _INVERSE = {
     "below": "above",
     "in_front_of": "behind",
     "behind": "in_front_of",
-    "on_top_of": "below",
+    "on_top_of": "under",
     "under": "on_top_of",
     
     # Composite touching relations
@@ -1286,14 +1286,17 @@ class RelationInferencer:
                     best_is_depth = best_name in spatial_depth
                     rel_is_directional = rel_name in spatial_directional
                     best_is_directional = best_name in spatial_directional
-                    # Prefer depth relations over directional ones when confidence is tied.
-                    if rel_is_depth and best_is_directional:
+                    # Prefer directional relations over depth ones when confidence is
+                    # tied: left/right/above/below are more reliable and more useful
+                    # for spatial reasoning than monocular in_front_of/behind, which is
+                    # noisy on flat scenes.
+                    if rel_is_directional and best_is_depth:
                         best_rel = rel
                         best_priority = priority
                         best_confidence = confidence
                         best_specificity = specificity
                         continue
-                    if best_is_depth and rel_is_directional:
+                    if best_is_directional and rel_is_depth:
                         continue
                     if specificity > best_specificity or (
                         specificity == best_specificity and confidence > best_confidence
@@ -1311,6 +1314,7 @@ class RelationInferencer:
         *,
         question_rel_terms: Optional[Set[str]] = None,
         question_subject_idxs: Optional[Set[int]] = None,
+        question_candidate_idxs: Optional[Set[int]] = None,
     ) -> bool:
         """Return True if a relation matches the question direction/context."""
         if rel is None:
@@ -1360,17 +1364,18 @@ class RelationInferencer:
         if any(contact in rel_name for contact in spatial_contact):
             return 3
 
-        # 2: generic proximity
-        spatial_generic = {"near", "close"}
-        if any(gen in rel_name for gen in spatial_generic):
-            return 2
-            
-        # 2: directional + depth relations (same priority)
+        # 2: directional relations — most reliable and most useful for spatial
+        # reasoning, so ranked above depth and proximity.
         spatial_directional = {"left_of", "right_of", "above", "below"}
-        spatial_depth = {"in_front_of", "behind"}
-        if any(dir_rel in rel_name for dir_rel in spatial_directional | spatial_depth):
+        if any(dir_rel in rel_name for dir_rel in spatial_directional):
             return 2
-            
+
+        # 1: monocular depth relations (noisy on flat scenes) and generic proximity
+        spatial_depth = {"in_front_of", "behind"}
+        spatial_generic = {"near", "close"}
+        if any(tok in rel_name for tok in spatial_depth | spatial_generic):
+            return 1
+
         # 0: others
         return 0
 
@@ -1775,6 +1780,7 @@ class RelationInferencer:
         *,
         question_rel_terms: Optional[Set[str]] = None,
         question_subject_idxs: Optional[Set[int]] = None,
+        question_candidate_idxs: Optional[Set[int]] = None,
         masks: Optional[Sequence[dict]] = None,
         depths: Optional[Sequence[float]] = None,
         depth_map: Optional[np.ndarray] = None,
@@ -1782,10 +1788,18 @@ class RelationInferencer:
         """
         Ensure that relations explicitly requested by the question exist when geometry supports them.
         """
-        if not question_rel_terms or not question_subject_idxs or not boxes:
+        if not question_rel_terms or not boxes:
             return relationships
+        unknown_target = not question_subject_idxs
+        if unknown_target:
+            if not question_candidate_idxs:
+                return relationships
+            question_subject_idxs = set(range(len(boxes))) - set(question_candidate_idxs)
 
-        directional = {"above", "below", "left_of", "right_of", "in_front_of", "behind"}
+        directional = {
+            "above", "below", "left_of", "right_of", "in_front_of", "behind",
+            "next_to", "near", "on_top_of",
+        }
         rel_terms = {t for t in question_rel_terms if t in directional}
         if not rel_terms:
             return relationships
@@ -1815,14 +1829,15 @@ class RelationInferencer:
             cx_t, cy_t = centers[tgt]
             for rel in rel_terms:
                 # If already present for this target, skip.
-                if rel in {"above", "below", "left_of", "right_of"}:
-                    already = any(
-                        r[2] == rel and r[1] == tgt for r in existing
+                already = any(
+                    relation == rel
+                    and target == tgt
+                    and (
+                        question_candidate_idxs is None
+                        or source in question_candidate_idxs
                     )
-                else:
-                    already = any(
-                        r[2] == rel and r[1] == tgt for r in existing
-                    )
+                    for source, target, relation in existing
+                )
                 if already:
                     continue
 
@@ -1830,6 +1845,8 @@ class RelationInferencer:
                 best_dist = float("inf")
                 for i in range(len(boxes)):
                     if i == tgt:
+                        continue
+                    if question_candidate_idxs is not None and i not in question_candidate_idxs:
                         continue
                     cx_i, cy_i = centers[i]
                     dx = cx_i - cx_t
@@ -1854,14 +1871,50 @@ class RelationInferencer:
                     elif rel == "right_of":
                         if dx <= margin or abs(dx) < abs(dy) * 0.6:
                             continue
-                    elif rel in {"in_front_of", "behind"}:
+                    elif rel == "on_top_of":
+                        horizontal_overlap = max(
+                            0.0,
+                            min(boxes[i][2], boxes[tgt][2])
+                            - max(boxes[i][0], boxes[tgt][0]),
+                        )
+                        min_width = min(widths[i], widths[tgt])
+                        if dy >= -margin or horizontal_overlap / min_width < 0.15:
+                            continue
+                    elif rel == "in_front_of":
+                        overlap_w = max(
+                            0.0,
+                            min(boxes[i][2], boxes[tgt][2])
+                            - max(boxes[i][0], boxes[tgt][0]),
+                        )
+                        overlap_h = max(
+                            0.0,
+                            min(boxes[i][3], boxes[tgt][3])
+                            - max(boxes[i][1], boxes[tgt][1]),
+                        )
+                        overlap_ratio = (overlap_w * overlap_h) / max(
+                            1.0,
+                            min(widths[i] * heights[i], widths[tgt] * heights[tgt]),
+                        )
+                        delta = float(getattr(self.config, "depth_front_threshold", 0.05))
+                        depth_support = (
+                            da is not None
+                            and db is not None
+                            and float(da) > float(db) + delta
+                        )
+                        # Occluding a meaningful part of a named doorway/object
+                        # is independent 2D evidence that the source is in front.
+                        if not depth_support and overlap_ratio < 0.15:
+                            continue
+                    elif rel == "behind":
                         if da is None or db is None:
                             continue
                         delta = float(getattr(self.config, "depth_front_threshold", 0.05))
-                        if rel == "in_front_of" and (da <= db + delta):
+                        if da >= db - delta:
                             continue
-                        if rel == "behind" and (da >= db - delta):
-                            continue
+                    elif rel in {"next_to", "near"}:
+                        # Nearest-neighbour geometry is sufficient for these
+                        # non-directional question predicates.
+                        pass
                     dist = math.hypot(dx, dy)
                     if dist < best_dist:
                         best_idx = i
@@ -1886,6 +1939,24 @@ class RelationInferencer:
 
         if added:
             relationships = list(relationships) + added
+        if unknown_target:
+            requested = set(rel_terms)
+            source_candidates = set(question_candidate_idxs or ())
+            candidates = [
+                relation for relation in relationships
+                if relation.get("relation") in requested
+                and relation.get("src_idx") in source_candidates
+            ]
+            best_by_relation = {}
+            for relation in candidates:
+                key = relation.get("relation")
+                if (
+                    key not in best_by_relation
+                    or float(relation.get("distance", float("inf")))
+                    < float(best_by_relation[key].get("distance", float("inf")))
+                ):
+                    best_by_relation[key] = relation
+            return list(best_by_relation.values())
         return relationships
 
     # unify_spatial_direction removed: spatial relations keep original direction src_idx → tgt_idx

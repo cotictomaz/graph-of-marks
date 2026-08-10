@@ -33,9 +33,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-from .config import PreprocessorConfig
+from .config import PreprocessorConfig, default_config
 from .graph.prompt import graph_to_prompt, graph_to_triples_text
-from .pipeline.preprocessor import ImageGraphPreprocessor
+from .pipeline.preprocessor import ImageGraphPreprocessor, rank_paper_relations
+from .question_intent import canonical_object_label, parse_question_intent
+from .relations.paper import (
+    FastTextSimilarity,
+    PaperRelationConfig,
+    filter_paper_graph,
+    infer_paper_relations,
+    relation_digest,
+    validate_paper_relation,
+)
 from .viz.visualizer import Visualizer, VisualizerConfig
 
 # GoM prompting style presets matching the paper's experimental configurations
@@ -189,6 +198,12 @@ class ProcessingConfig:
     # Relationships
     max_relations_per_object: int = 3
     min_relations_per_object: int = 0
+    profile: Literal["quality_vqa", "paper_aaai26"] = "quality_vqa"
+    relation_selection_policy: Literal[
+        "question_only", "paper_ranked", "paper_algorithm"
+    ] = "question_only"
+    paper_ranked_max_relations: int = 16
+    paper_fasttext_path: Optional[str] = None
 
     # Style preset (overrides individual style settings if set)
     style: Optional[GomStyle] = None
@@ -202,10 +217,21 @@ class ProcessingConfig:
 
     # Visualization appearance
     show_segmentation: bool = True
-    fill_segmentation: bool = True
-    seg_fill_alpha: float = 0.25
-    show_bboxes: bool = True
+    fill_segmentation: bool = False
+    seg_fill_alpha: float = 0.0
+    show_bboxes: bool = False
     bbox_linewidth: float = 2.0
+    label_bbox_linewidth: float = 3.0
+    relation_label_bbox_linewidth: float = 3.0
+    rel_arrow_linewidth: float = 2.0
+    rel_arrow_mutation_scale: float = 26.0
+    obj_fontsize_inside: int = 14
+    obj_fontsize_outside: int = 14
+    rel_fontsize: int = 12
+    auto_scale_styles: bool = True
+    style_ref_px: int = 1000
+    style_scale_min: float = 0.5
+    style_scale_max: float = 2.0
     color_sat_boost: float = 1.1
     color_val_boost: float = 1.1
 
@@ -216,7 +242,7 @@ class ProcessingConfig:
 
     # VQA question-guided filtering
     question: Optional[str] = None
-    apply_question_filter: bool = False
+    apply_question_filter: bool = True
     aggressive_pruning: bool = False
     filter_relations_by_question: bool = True
 
@@ -233,6 +259,42 @@ class ProcessingConfig:
 
     def __post_init__(self):
         """Apply style preset if specified."""
+        if self.profile not in {"quality_vqa", "paper_aaai26"}:
+            raise ValueError("profile must be 'quality_vqa' or 'paper_aaai26'")
+        if self.relation_selection_policy not in {
+            "question_only", "paper_ranked", "paper_algorithm"
+        }:
+            raise ValueError(
+                "relation_selection_policy must be 'question_only', 'paper_ranked', "
+                "or 'paper_algorithm'"
+            )
+        if self.profile == "paper_aaai26":
+            self.threshold = 0.5
+            self.threshold_owl = 0.5
+            self.threshold_yolo = 0.5
+            self.threshold_detectron = 0.5
+            self.relation_selection_policy = "paper_algorithm"
+            self.max_detections = 0
+            self.max_relations_per_object = 3
+            self.min_relations_per_object = 0
+            self.apply_question_filter = True
+            self.aggressive_pruning = False
+            self.filter_relations_by_question = True
+            self.show_segmentation = True
+            self.fill_segmentation = True
+            self.seg_fill_alpha = 0.25
+            self.show_bboxes = False
+            self.obj_fontsize_inside = 9
+            self.obj_fontsize_outside = 10
+            self.rel_fontsize = 8
+            self.bbox_linewidth = 1.8
+            self.label_bbox_linewidth = 1.0
+            self.relation_label_bbox_linewidth = 1.0
+            self.rel_arrow_linewidth = 2.0
+            self.rel_arrow_mutation_scale = 12.0
+            self.auto_scale_styles = False
+            self.color_sat_boost = 1.0
+            self.color_val_boost = 1.0
         if self.style is not None:
             if self.style not in GOM_STYLE_PRESETS:
                 raise ValueError(
@@ -302,6 +364,8 @@ class GoM:
         depth_fn: Optional[Callable[[Image.Image], np.ndarray]] = None,
         output_dir: str = "output",
         device: Optional[str] = None,
+        profile: Literal["quality_vqa", "paper_aaai26"] = "quality_vqa",
+        paper_fasttext_path: Optional[str] = None,
     ):
         """
         Initialize the pipeline and load models.
@@ -325,6 +389,8 @@ class GoM:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
+        self.profile = profile
+        self.paper_fasttext_path = paper_fasttext_path
 
         # Build minimal config for model initialization
         # These are MODEL settings, not processing settings
@@ -332,7 +398,7 @@ class GoM:
             "output_folder": str(self.output_dir),
             "output_format": "png",
             # Detection model config
-            "detectors_to_use": ("yolov8",) if detect_fn is None else (),
+            "detectors_to_use": ("owlvit", "yolov8") if detect_fn is None else (),
             "threshold_yolo": 0.5,  # Default, can be overridden per-call
             "detection_resize": True,
             "detection_max_side": 1200,
@@ -359,7 +425,16 @@ class GoM:
         if device:
             cfg_dict["preproc_device"] = device
 
-        self._model_config = PreprocessorConfig(**cfg_dict)
+        if profile == "paper_aaai26":
+            self._model_config = default_config("paper_aaai26")
+            self._model_config.output_folder = str(self.output_dir)
+            self._model_config.paper_fasttext_path = paper_fasttext_path
+            if device:
+                self._model_config.preproc_device = device
+        elif profile == "quality_vqa":
+            self._model_config = PreprocessorConfig(**cfg_dict)
+        else:
+            raise ValueError("profile must be 'quality_vqa' or 'paper_aaai26'")
 
         # Initialize preprocessor (loads models)
         self._preprocessor = ImageGraphPreprocessor(self._model_config)
@@ -397,7 +472,16 @@ class GoM:
 
         # Use default config if not provided
         if config is None:
-            config = ProcessingConfig()
+            config = ProcessingConfig(
+                profile=self.profile,
+                paper_fasttext_path=self.paper_fasttext_path,
+            )
+        if config.profile != self.profile:
+            raise ValueError(
+                f"GoM was initialized with profile={self.profile!r}, but process() "
+                f"received profile={config.profile!r}. Initialize a separate GoM instance "
+                "because detector and depth models are profile-specific."
+            )
 
         # Determine output directory
         output_dir = Path(config.output_dir) if config.output_dir else self.output_dir
@@ -413,6 +497,11 @@ class GoM:
             image_name = f"image_{int(time.time())}"
 
         W, H = image_pil.size
+        intent = (
+            parse_question_intent(config.question or "")
+            if config.question and config.apply_question_filter
+            else None
+        )
 
         # Detection
         if self.detect_fn is not None:
@@ -424,7 +513,9 @@ class GoM:
             self._preprocessor.cfg.threshold_yolo = config.threshold_yolo if config.threshold_yolo is not None else config.threshold
             self._preprocessor.cfg.threshold_detectron = config.threshold_detectron if config.threshold_detectron is not None else config.threshold
             self._preprocessor.cfg.threshold_grounding_dino = config.threshold_grounding_dino if config.threshold_grounding_dino is not None else config.threshold
-            det_result = self._preprocessor._run_detectors(image_pil)
+            det_result = self._preprocessor._run_detectors(
+                image_pil, question_intent=intent
+            )
             boxes = det_result.get("boxes", [])
             labels = det_result.get("labels", [])
             scores = det_result.get("scores", [])
@@ -440,7 +531,12 @@ class GoM:
         # Question-based filtering (VQA)
         obj_terms = set()
         rel_terms = set()
-        if config.question and config.apply_question_filter and boxes:
+        if (
+            config.question
+            and config.apply_question_filter
+            and boxes
+            and config.relation_selection_policy != "paper_algorithm"
+        ):
             # Update preprocessor config with question filtering settings
             self._preprocessor.cfg.question = config.question
             self._preprocessor.cfg.apply_question_filter = config.apply_question_filter
@@ -452,13 +548,18 @@ class GoM:
             # Extract question terms
             obj_terms, rel_terms = self._preprocessor._parse_question(config.question)
 
-            # Apply question-based filtering
-            if config.aggressive_pruning:
-                filtered = self._preprocessor._filter_by_question_terms(
-                    boxes, labels, scores, obj_terms
-                )
-                if filtered[0]:  # Only apply if we got results
-                    boxes, labels, scores = filtered
+            relevant_terms = {
+                str(term).replace("_", " ").lower()
+                for term in intent.object_terms
+            }
+            relevant_indices = [
+                index for index, label in enumerate(labels)
+                if canonical_object_label(label) in relevant_terms
+            ]
+            if relevant_indices:
+                boxes = [boxes[i] for i in relevant_indices]
+                labels = [labels[i] for i in relevant_indices]
+                scores = [scores[i] for i in relevant_indices]
 
         # Segmentation
         masks = []
@@ -468,6 +569,27 @@ class GoM:
             elif self._preprocessor.segmenter:
                 seg_results = self._preprocessor.segmenter.segment(image_pil, boxes)
                 masks = [r.get("segmentation") if isinstance(r, dict) else r for r in seg_results]
+
+        if config.profile == "paper_aaai26" and boxes and masks:
+            if len(masks) != len(boxes):
+                raise RuntimeError(
+                    "paper_aaai26 requires one segmentation mask per detection"
+                )
+            mask_dicts = [{"segmentation": mask} for mask in masks]
+            boxes, labels, scores, mask_dicts, _, _ = (
+                self._preprocessor._remove_overlapping_objects(
+                    boxes,
+                    labels,
+                    scores,
+                    masks=mask_dicts,
+                    iou_threshold=0.50,
+                    same_class_mask_iou_threshold=0.80,
+                    containment_threshold=0.90,
+                    enable_containment_removal=True,
+                    cross_class=False,
+                )
+            )
+            masks = [mask["segmentation"] for mask in (mask_dicts or [])]
 
         # Depth
         depth = None
@@ -499,18 +621,59 @@ class GoM:
                     y = int(np.clip(round(cy), 0, H - 1))
                     depths_at_centers.append(float(depth[y, x]))
 
-            relationships = self._preprocessor.relations_inferencer.infer(
-                image_pil=image_pil,
-                boxes=boxes,
-                labels=labels,
-                masks=[{"segmentation": m} for m in masks] if masks else None,
-                depths=depths_at_centers,
-                use_geometry=True,
-                use_clip=False,
-            )
+            if config.relation_selection_policy == "paper_algorithm":
+                fasttext = FastTextSimilarity(config.paper_fasttext_path)
+                if not fasttext.available:
+                    raise FileNotFoundError(
+                        "paper_aaai26 requires paper_fasttext_path pointing to a "
+                        "converted cc.en.300 KeyedVectors file"
+                    )
+                paper_config = PaperRelationConfig()
+                relationships = infer_paper_relations(
+                    boxes,
+                    labels=labels,
+                    depths=depths_at_centers,
+                    image_size=(W, H),
+                    config=paper_config,
+                )
+                kept_indices, relationships = filter_paper_graph(
+                    labels,
+                    relationships,
+                    question=config.question or "",
+                    config=paper_config,
+                    semantic_similarity=fasttext,
+                )
+                boxes = [boxes[index] for index in kept_indices]
+                labels = [labels[index] for index in kept_indices]
+                scores = [scores[index] for index in kept_indices]
+                if masks:
+                    if len(masks) != len(depths_at_centers or []):
+                        raise RuntimeError(
+                            "paper_aaai26 requires one segmentation mask per detection"
+                        )
+                    masks = [masks[index] for index in kept_indices]
+                if depths_at_centers is not None:
+                    depths_at_centers = [
+                        depths_at_centers[index] for index in kept_indices
+                    ]
+            else:
+                relationships = self._preprocessor.relations_inferencer.infer(
+                    image_pil=image_pil,
+                    boxes=boxes,
+                    labels=labels,
+                    masks=[{"segmentation": m} for m in masks] if masks else None,
+                    depths=depths_at_centers,
+                    use_geometry=True,
+                    use_clip=False,
+                )
 
             # Filter relationships by question terms if enabled
-            if config.question and config.filter_relations_by_question and rel_terms:
+            if (
+                config.relation_selection_policy == "question_only"
+                and config.question
+                and config.filter_relations_by_question
+                and rel_terms
+            ):
                 filtered_rels = []
                 for rel in relationships:
                     rel_type = rel.get("relation", "")
@@ -520,18 +683,69 @@ class GoM:
                     if any(term.replace("_", " ").lower() in rel_base or rel_base in term.replace("_", " ").lower()
                            for term in rel_terms):
                         filtered_rels.append(rel)
-                # Only apply filter if we found matches, otherwise keep all
-                if filtered_rels:
-                    relationships = filtered_rels
+                relationships = filtered_rels
+                relation_anchors = set(intent.relation_anchor_terms)
+                target_indices = {
+                    index for index, label in enumerate(labels)
+                    if canonical_object_label(label) in relation_anchors
+                }
+                if target_indices:
+                    target_indices = {
+                        max(target_indices, key=lambda index: float(scores[index]))
+                    }
+                candidate_indices = {
+                    index for index, label in enumerate(labels)
+                    if canonical_object_label(label) in intent.relation_source_terms
+                }
+                relationships = self._preprocessor.relations_inferencer.enforce_question_relations(
+                    relationships,
+                    boxes,
+                    question_rel_terms=set(intent.relation_terms),
+                    question_subject_idxs=target_indices or None,
+                    question_candidate_idxs=candidate_indices or None,
+                    masks=[{"segmentation": mask} for mask in masks] if masks else None,
+                    depths=depths_at_centers,
+                    depth_map=depth,
+                )
+                relationships = [
+                    relation for relation in relationships
+                    if (not candidate_indices or relation.get("src_idx") in candidate_indices)
+                    and (not target_indices or relation.get("tgt_idx") in target_indices)
+                ]
 
             # Apply per-object limits from config
-            relationships = self._preprocessor.relations_inferencer.limit_relationships_per_object(
-                relationships,
-                boxes,
-                max_relations_per_object=config.max_relations_per_object,
-                min_relations_per_object=config.min_relations_per_object,
-            )
-            relationships = self._preprocessor.relations_inferencer.drop_inverse_duplicates(relationships)
+            if config.relation_selection_policy != "paper_algorithm":
+                relationships = self._preprocessor.relations_inferencer.limit_relationships_per_object(
+                    relationships,
+                    boxes,
+                    max_relations_per_object=config.max_relations_per_object,
+                    min_relations_per_object=(
+                        0
+                        if config.relation_selection_policy == "paper_ranked"
+                        else config.min_relations_per_object
+                    ),
+                )
+                relationships = self._preprocessor.relations_inferencer.drop_inverse_duplicates(relationships)
+            if config.relation_selection_policy == "paper_ranked":
+                relationships = rank_paper_relations(
+                    relationships,
+                    question_rel_terms=set(intent.relation_terms) or None,
+                    question_subject_idxs={
+                        index
+                        for index, label in enumerate(labels)
+                        if canonical_object_label(label)
+                        in set(intent.relation_anchor_terms)
+                    }
+                    or None,
+                    question_candidate_idxs={
+                        index
+                        for index, label in enumerate(labels)
+                        if canonical_object_label(label)
+                        in set(intent.relation_source_terms)
+                    }
+                    or None,
+                    max_total=config.paper_ranked_max_relations,
+                )
 
         # Build scene graph for textual representation
         scene_graph = None
@@ -553,15 +767,23 @@ class GoM:
                     labels=labels,
                     scores=scores,
                 )
+                if config.relation_selection_policy == "paper_algorithm":
+                    scene_graph.remove_edges_from(list(scene_graph.edges()))
                 for rel in relationships:
                     src_idx = rel.get("src_idx", -1)
                     tgt_idx = rel.get("tgt_idx", -1)
                     relation = rel.get("relation", "related_to")
                     if 0 <= src_idx < len(boxes) and 0 <= tgt_idx < len(boxes):
+                        if config.relation_selection_policy == "paper_algorithm":
+                            validate_paper_relation(rel)
                         if scene_graph.has_edge(src_idx, tgt_idx):
-                            scene_graph[src_idx][tgt_idx]["relation"] = relation
+                            scene_graph[src_idx][tgt_idx].update(dict(rel))
                         else:
-                            scene_graph.add_edge(src_idx, tgt_idx, relation=relation)
+                            scene_graph.add_edge(src_idx, tgt_idx, **dict(rel))
+                if config.relation_selection_policy == "paper_algorithm":
+                    scene_graph.graph["edge_digest"] = relation_digest(relationships)
+                    scene_graph.graph["edge_count"] = len(relationships)
+                    scene_graph.graph["relation_selection_policy"] = "paper_algorithm"
                 scene_graph_text = graph_to_triples_text(scene_graph)
                 scene_graph_prompt = graph_to_prompt(scene_graph)
             except Exception:
@@ -636,8 +858,25 @@ class GoM:
             show_bboxes=config.show_bboxes,
             seg_fill_alpha=config.seg_fill_alpha,
             bbox_linewidth=config.bbox_linewidth,
+            label_bbox_linewidth=config.label_bbox_linewidth,
+            relation_label_bbox_linewidth=config.relation_label_bbox_linewidth,
+            rel_arrow_linewidth=config.rel_arrow_linewidth,
+            rel_arrow_mutation_scale=config.rel_arrow_mutation_scale,
+            obj_fontsize_inside=config.obj_fontsize_inside,
+            obj_fontsize_outside=config.obj_fontsize_outside,
+            rel_fontsize=config.rel_fontsize,
+            auto_scale_styles=config.auto_scale_styles,
+            style_ref_px=config.style_ref_px,
+            style_scale_min=config.style_scale_min,
+            style_scale_max=config.style_scale_max,
             color_sat_boost=config.color_sat_boost,
             color_val_boost=config.color_val_boost,
+            filter_redundant_relations=(
+                config.relation_selection_policy != "paper_algorithm"
+            ),
+            cap_relations_per_object=(
+                config.relation_selection_policy != "paper_algorithm"
+            ),
         )
         visualizer = Visualizer(viz_config)
         
@@ -655,9 +894,13 @@ class GoM:
         
         # Convert matplotlib figure to PIL Image
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, dpi=150)
+        fig.savefig(buf, format="png", bbox_inches=None, pad_inches=0, dpi=100)
         buf.seek(0)
         output_image = Image.open(buf).convert("RGB")
+        if output_image.size != image.size:
+            output_image = output_image.resize(
+                image.size, getattr(Image, "Resampling", Image).LANCZOS
+            )
         plt.close(fig)
         
         return output_image

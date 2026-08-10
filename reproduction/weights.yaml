@@ -1,0 +1,6 @@
+schema_version: 1
+weights:
+  yolov8x.pt: 3df4ada6b4dad6d657868f2fdf7faecfb34dcfccf3a25c4b82079064718524c8
+  sam_hq_vit_h.pth: a7ac14a085326d9fa6199c8c698c4f0e7280afdbb974d2c4660ec60877b45e35
+  model_final_a3ec72.pkl: 7b0dfdb34b35f7f7d8f31bb2cd99f9cbb7068b106d89be460b92c149bd037226
+  dpt_large_384.pt: 2f21e586477d90cb9624c7eef5df7891edca49a1c4795ee2cb631fd4daa6ca69

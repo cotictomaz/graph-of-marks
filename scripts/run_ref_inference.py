@@ -10,8 +10,20 @@ import argparse
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Optional
+
+# Load .env (HF_HOME, HF_TOKEN, ...) before importing vllm/torch so cache
+# and auth environment variables take effect.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+try:
+    from gom.utils.env import load_dotenv
+
+    load_dotenv(_REPO_ROOT / ".env" if (_REPO_ROOT / ".env").is_file() else None)
+except Exception:
+    pass
 
 from vllm import LLM, SamplingParams
 

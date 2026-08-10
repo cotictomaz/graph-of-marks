@@ -1,0 +1,53 @@
+schema_version: 1
+datasets:
+  vqav2:
+    status: exact_author_image_split
+    query_status: exact_released_author_manifest
+    manifest: manifests/vqav2_author.json
+    sha256: db879d7c3f17761ba0557a90320ea71c241caa03b184e543292a3548967c792f
+    source_rows: 5181
+    canonical_rows: 5180
+    unique_images: 1000
+    paper_reported_queries_per_image: 4
+    observed_queries_per_image: 5.18
+    image_subdir: vqav2/train2014
+    metric: vqav2
+  gqa:
+    status: exact_author_image_split
+    query_status: reconstructed_all_associated_released_rows
+    manifest: manifests/gqa_author.json
+    sha256: f633e19e65c38cfdd68fbe9f8f611a6f7e0aec1b903ccad609a3b6e87bbf7e25
+    source_rows: 15356
+    canonical_rows: 15334
+    unique_images: 1000
+    paper_reported_queries_per_image: 3
+    observed_queries_per_image: 15.334
+    image_subdir: gqa/images
+    metric: gqa
+    note: Exact ZIP image IDs joined to all associated rows in the released 943000-row GQA pool; 22 exact image-question duplicates are removed canonically. The observed row count conflicts with the paper's stated average.
+  vqav1:
+    status: exact_author_image_split
+    query_status: exact_recovered_author_manifest
+    manifest: manifests/vqav1_author.json
+    sha256: 7ae72ade5bf1446ffc2a320b94a53993740cf1a6c77eb10716062d18b73e42ba
+    source_rows: 3000
+    canonical_rows: 3000
+    unique_images: 1000
+    paper_reported_queries_per_image: 4
+    observed_queries_per_image: 3.0
+    image_subdir: vqav1/train2014
+    metric: vqav1
+  refcocog:
+    status: exact_author_image_split
+    query_status: reconstructed_official_grouped_targets
+    manifest: manifests/refcocog_author.json
+    sha256: 26aa9d64eaf4a00478f693f49866071dfef8df2317c95287f9018bc05d9c6fb2
+    source_rows: 1000
+    canonical_rows: 1000
+    unique_images: 1000
+    paper_reported_queries_per_image: 1
+    observed_queries_per_image: 1.0
+    image_subdir: refcocog/images
+    metric: refcocog
+    target_instances: 1938
+    note: One grouped REC prompt per author image, retaining every associated RefCOCOg target instance and its first official expression. Exact author query selection was not released.

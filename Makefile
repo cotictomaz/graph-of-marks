@@ -25,24 +25,25 @@ YOLO_THRESHOLD          ?= 0.5
 DETECTRON_THRESHOLD     ?= 0.5
 
 # Fusion and deduplication thresholds
-WBF_IOU_THRESHOLD              ?= 0.15
-LABEL_NMS_THRESHOLD            ?= 0.15
-SAME_CLASS_IOU_THRESHOLD       ?= 0.15
+WBF_IOU_THRESHOLD              ?= 0.90
+LABEL_NMS_THRESHOLD            ?= 0.50
+SAME_CLASS_IOU_THRESHOLD       ?= 0.30
 CROSS_CLASS_SCORE_DIFF_THRESH  ?= 0.80
 
 # SAM parameters
 SAM_VERSION             ?= hq
 
-# Visualization options
+# Visualization options (GoM render: segmentation contours + object IDs + relation arrows/labels)
+PROFILE                 ?= quality_vqa
 LABEL_MODE              ?= original
-DISPLAY_RELATION_LABELS ?= false
-DISPLAY_RELATIONSHIPS   ?= false
-DISPLAY_LABELS         ?= false
-NO_LEGEND               ?= false
-NO_BBOXES               ?= false
-SHOW_SEGMENTATION       ?= false
+DISPLAY_RELATION_LABELS ?= true
+DISPLAY_RELATIONSHIPS   ?= true
+DISPLAY_LABELS         ?= true
+NO_LEGEND               ?= true
+NO_BBOXES               ?= true
+SHOW_SEGMENTATION       ?= true
 FILL_SEGMENTATION       ?= false
-SEG_FILL_ALPHA          ?= 0.15
+SEG_FILL_ALPHA          ?= 0.0
 
 # Output configurations
 SAVE_IMAGE_ONLY         ?= false
@@ -58,8 +59,8 @@ IMAGE_COLUMN            ?= image
 NUM_INSTANCES           ?= -1
 
 # Relation constraints
-MAX_RELATIONS_PER_OBJECT ?= 5
-MIN_RELATIONS_PER_OBJECT ?= 1
+MAX_RELATIONS_PER_OBJECT ?= 3
+MIN_RELATIONS_PER_OBJECT ?= 0
 
 # VQA parameters
 VQA_INPUT_FILE          ?=
@@ -80,9 +81,12 @@ SKIP_PREPROCESSING      ?= false
 INCLUDE_SCENE_GRAPH     ?= false
 PREPROCESS_ONLY         ?= false
 
-.PHONY: all preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 batch_preprocess run_vqa run_vqa_folder download_dataset clean help fast_preprocess
+.PHONY: all preprocess preprocess_owlvit preprocess_yolo preprocess_detectron2 batch_preprocess run_vqa run_vqa_folder download_dataset clean help fast_preprocess reproduce-table2
 
 all: preprocess
+
+reproduce-table2:
+	./reproduce.sh table2
 
 #------------------------------------------------------------------------------
 # 🚀 ULTRA-FAST PREPROCESSING (< 10s per image)
@@ -125,6 +129,7 @@ ifeq ($(strip $(JSON_FILE)),)
 	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/image_preprocessor.py \
 	    --input_path "$(INPUT_PATH)" \
 	    --output_folder "$(OUTPUT_FOLDER)" \
+	    --profile $(PROFILE) \
 	    --detectors "$(DETECTORS)" \
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \
@@ -151,6 +156,7 @@ else
 	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/image_preprocessor.py \
 	    --json_file "$(JSON_FILE)" \
 	    --output_folder "$(OUTPUT_FOLDER)" \
+	    --profile $(PROFILE) \
 	    --detectors "$(DETECTORS)" \
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \
@@ -198,6 +204,7 @@ batch_preprocess: check_input
 	PYTHONPATH=/workdir/src:/workdir:$$PYTHONPATH python3 src/image_preprocessor.py \
 	    --input_path "$(INPUT_PATH)" \
 	    --output_folder "$(OUTPUT_FOLDER)" \
+	    --profile $(PROFILE) \
 	    --detectors "$(DETECTORS)" \
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \
@@ -242,6 +249,7 @@ run_vqa: check_vqa_input
 	    $(if $(filter true,$(PREPROCESS_ONLY)),--preprocess_only) \
 	    --preproc_folder $(PREPROC_FOLDER) \
 	    --output_folder $(OUTPUT_FOLDER) \
+	    --profile $(PROFILE) \
 	    --detectors "$(DETECTORS)" \
 	    --owl_threshold $(OWL_THRESHOLD) \
 	    --yolo_threshold $(YOLO_THRESHOLD) \

@@ -72,6 +72,7 @@ class DepthConfig:
     warmup: bool = False  # Run warmup inference (adds ~0.5s init time)
     download_timeout: int = 300  # HuggingFace download timeout (seconds)
     show_download_progress: bool = True  # Show progress bar during download
+    midas_repo: str = "isl-org/MiDaS:1645b7e1675301fdfac03640738fe5a6531e17d6"
 
 
 class DepthEstimatorV2:
@@ -398,8 +399,16 @@ class DepthEstimatorV2:
         """
         print(f"[DEPTH] Loading MiDaS: {model_name}")
         
-        # Set torch hub cache directory explicitly
-        torch.hub.set_dir(os.path.expanduser("~/.cache/torch/hub"))
+        # Keep the hub cache on the configured model volume when one is
+        # provided.  The preprocessing container is disposable, so forcing
+        # the default /root cache would redownload the checkpoint per run.
+        torch_home = os.environ.get("TORCH_HOME")
+        hub_cache = (
+            os.path.join(torch_home, "hub")
+            if torch_home
+            else os.path.expanduser("~/.cache/torch/hub")
+        )
+        torch.hub.set_dir(hub_cache)
         
         # Load model (torch.hub automatically uses cache if available)
         max_retries = 3
@@ -408,7 +417,7 @@ class DepthEstimatorV2:
         for attempt in range(max_retries):
             try:
                 self.model = torch.hub.load(
-                    "intel-isl/MiDaS", 
+                    self.config.midas_repo,
                     model_name,
                     skip_validation=False,  # Validate cache
                     trust_repo=True,  # Suppress untrusted repo warning
@@ -416,7 +425,7 @@ class DepthEstimatorV2:
                 ).to(self.device).eval()  # type: ignore[attr-defined]
                 
                 transforms = torch.hub.load(
-                    "intel-isl/MiDaS", 
+                    self.config.midas_repo,
                     "transforms",
                     skip_validation=False,
                     trust_repo=True,  # Suppress untrusted repo warning
@@ -583,30 +592,34 @@ class DepthEstimatorV2:
         
         return pred.astype(np.float32)
     
-    def _normalize_depth(self, depth: np.ndarray, invert: bool = True) -> np.ndarray:
+    def _normalize_depth(self, depth: np.ndarray, invert: bool = False) -> np.ndarray:
         """
         Normalize depth to [0, 1] range.
-        
+
+        MiDaS and Depth Anything (relative) both output disparity-like maps
+        where larger raw values already mean CLOSER to the camera, so no
+        inversion is needed to obtain the 1.0 = closer convention.
+
         Args:
             depth: Raw depth map
-            invert: If True, invert so 1.0 = closer (standard for this codebase)
+            invert: If True, flip the scale (only for models emitting metric
+                    depth where larger = farther)
         """
         depth = np.asarray(depth, dtype=np.float32)
-        
+
         if not np.isfinite(depth).any():
             return np.full_like(depth, 0.5)
-        
+
         # Robust percentile-based normalization (handles outliers)
         finite = depth[np.isfinite(depth)]
         pmin, pmax = np.percentile(finite, [2.0, 98.0])
         rng = max(1e-6, float(pmax - pmin))
-        
+
         normalized = np.clip((depth - pmin) / rng, 0.0, 1.0)
-        
-        # Invert if needed (MiDaS: larger = farther, we want larger = closer)
+
         if invert:
             normalized = 1.0 - normalized
-        
+
         return normalized
     
     def relative_depth_at(

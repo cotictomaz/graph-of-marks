@@ -380,6 +380,14 @@ class Detector(ABC):
         dets = self.detect(img)
         return self._apply_score_threshold(dets)
 
+    def run_batch(self, images: Sequence[Image.Image]) -> List[List[Detection]]:
+        """Batch counterpart of :meth:`run`, including RGB and score filtering."""
+        rgb_images = [self._ensure_rgb(image) for image in images]
+        return [
+            self._apply_score_threshold(list(detections or []))
+            for detections in self.detect_batch(rgb_images)
+        ]
+
     # -------------------- context manager --------------------
 
     def __enter__(self) -> "Detector":

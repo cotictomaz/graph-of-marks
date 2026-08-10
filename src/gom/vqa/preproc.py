@@ -356,10 +356,10 @@ def _ensure_preproc(cfg_updates: Dict[str, Any] | None, preproc_obj: Optional[Pr
         if cfg_updates:
             # Update existing fields in a best-effort manner (ignore unknown keys)
             for k, v in cfg_updates.items():
-                if hasattr(preproc_obj.config, k):
-                    setattr(preproc_obj.config, k, v)
+                if hasattr(preproc_obj.cfg, k):
+                    setattr(preproc_obj.cfg, k, v)
                     if k in ['seg_fill_alpha', 'threshold_owl', 'threshold_yolo', 'threshold_detectron']:
-                        print(f"[DEBUG] Updated preproc_obj.config.{k} = {v}")
+                        print(f"[DEBUG] Updated preproc_obj.cfg.{k} = {v}")
         return preproc_obj
 
     cfg = default_config()
@@ -449,12 +449,12 @@ def preprocess_for_qa(
 
     else:
         # Fallback path: temporarily set `input_path` and invoke the batch runner on this single image.
-        old_in = pre.config.input_path
-        pre.config.input_path = image_path
+        old_in = pre.cfg.input_path
+        pre.cfg.input_path = image_path
         try:
             pre.run()
         finally:
-            pre.config.input_path = old_in
+            pre.cfg.input_path = old_in
 
     # If the exact "expected" filename was produced, return it immediately.
     if os.path.exists(expected):

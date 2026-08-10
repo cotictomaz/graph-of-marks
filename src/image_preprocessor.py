@@ -10,14 +10,28 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict
 
+# Load .env (HF_HOME, HF_TOKEN, ...) before importing torch-heavy modules.
+try:
+    from gom.utils.env import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 from gom.config import default_config, PreprocessorConfig
 from gom.pipeline.preprocessor import ImageGraphPreprocessor as Preprocessor
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Image Graph Preprocessor",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--profile",
+        choices=["quality_vqa", "paper_legacy", "paper_aaai26"],
+        default="quality_vqa",
+        help="Quality-first defaults or historical paper rendering/filtering",
     )
 
     # I/O
@@ -43,34 +57,52 @@ def _parse_args() -> argparse.Namespace:
 
     # Detectors
     p.add_argument("--detectors", type=str, default="owlvit,yolov8,detectron2")
-    p.add_argument("--owl_threshold", type=float, default=0.40)
-    p.add_argument("--yolo_threshold", type=float, default=0.80)
-    p.add_argument("--detectron_threshold", type=float, default=0.80)
+    p.add_argument("--owl_threshold", type=float, default=0.50)
+    p.add_argument("--yolo_threshold", type=float, default=0.50)
+    p.add_argument("--detectron_threshold", type=float, default=0.50)
     p.add_argument("--grounding_dino_threshold", type=float, default=0.30)
     p.add_argument("--grounding_dino_text_threshold", type=float, default=0.25)
 
     # Relations
     p.add_argument("--max_relations_per_object", type=int, default=3)
-    p.add_argument("--min_relations_per_object", type=int, default=1)
+    p.add_argument("--min_relations_per_object", type=int, default=None)
+    p.add_argument(
+        "--relation_selection_policy",
+        choices=["question_only", "paper_ranked", "paper_algorithm"],
+        default=None,
+    )
+    p.add_argument("--paper_ranked_max_relations", type=int, default=None)
+    p.add_argument("--paper_fasttext_path", type=str, default=None)
+    p.add_argument("--targeted_owl_threshold", type=float, default=0.20)
     p.add_argument("--margin", type=int, default=20)
     p.add_argument("--min_distance", type=float, default=10)
     p.add_argument("--max_distance", type=float, default=20000)
 
     # NMS / fusion
     p.add_argument("--label_nms_threshold", type=float, default=0.50)
-    p.add_argument("--seg_iou_threshold", type=float, default=0.70)
-    p.add_argument("--wbf_iou_threshold", type=float, default=0.55)
+    p.add_argument("--seg_iou_threshold", type=float, default=0.50)
+    p.add_argument("--wbf_iou_threshold", type=float, default=0.90)
     p.add_argument("--skip_box_threshold", type=float, default=0.10)
+    p.add_argument("--paper_faithful_fusion", action="store_true",
+                   help="Replicate paper c438ebc detection merge: raw concat + per-class NMS (no WBF/cross-class cascades)")
+    p.add_argument("--early_nms_threshold", type=float, default=0.50,
+                   help="Per-class NMS IoU applied after fusion in paper-faithful mode")
     p.add_argument("--cross_class_iou_threshold", type=float, default=0.75)
+    p.add_argument("--same_class_iou_threshold", type=float, default=None)
+    p.add_argument("--cross_class_score_diff_threshold", type=float, default=0.80)
     p.add_argument("--cascade_conf_threshold", type=float, default=0.40)
     p.add_argument("--detection_mask_merge_iou_thr", type=float, default=0.60)
     p.add_argument("--clip_cache_max_age_days", type=float, default=30.0)
-    p.add_argument("--keep_non_competing_low_scores", action="store_true")
+    p.add_argument(
+        "--keep_non_competing_low_scores",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     p.add_argument("--non_competing_iou_threshold", type=float, default=0.30)
     p.add_argument("--non_competing_min_score", type=float, default=0.05)
 
     # SAM
-    p.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="1")
+    p.add_argument("--sam_version", type=str, choices=["1", "2", "hq"], default="hq")
     p.add_argument("--sam_hq_model_type", type=str, choices=["vit_b", "vit_l", "vit_h"], default="vit_h")
     p.add_argument("--points_per_side", type=int, default=32)
     p.add_argument("--pred_iou_thresh", type=float, default=0.90)
@@ -80,22 +112,44 @@ def _parse_args() -> argparse.Namespace:
 
     # Visualization
     p.add_argument("--label_mode", type=str, choices=["original", "numeric", "alphabetic"], default="original")
-    p.add_argument("--display_labels", action="store_true")
-    p.add_argument("--display_relationships", action="store_true")
-    p.add_argument("--display_relation_labels", action="store_true")
-    p.add_argument("--show_segmentation", action="store_true")
-    p.add_argument("--fill_segmentation", action="store_true")
-    p.add_argument("--no_legend", action="store_true")
-    p.add_argument("--seg_fill_alpha", type=float, default=0.6)
-    p.add_argument("--bbox_linewidth", type=float, default=2.0)
-    p.add_argument("--obj_fontsize_inside", type=int, default=9)
-    p.add_argument("--obj_fontsize_outside", type=int, default=10)
-    p.add_argument("--rel_fontsize", type=int, default=8)
+    p.add_argument("--display_labels", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--display_relationships", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--display_relation_labels", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--show_segmentation", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--fill_segmentation", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--no_legend", action="store_true", default=None)
+    p.add_argument("--seg_fill_alpha", type=float, default=None)
+    p.add_argument("--bbox_linewidth", type=float, default=None)
+    p.add_argument("--obj_fontsize_inside", type=int, default=None)
+    p.add_argument("--obj_fontsize_outside", type=int, default=None)
+    p.add_argument("--rel_fontsize", type=int, default=None)
     p.add_argument("--legend_fontsize", type=int, default=8)
-    p.add_argument("--rel_arrow_linewidth", type=float, default=2.0)
-    p.add_argument("--rel_arrow_mutation_scale", type=float, default=22.0)
-    p.add_argument("--resolve_overlaps", action="store_true")
-    p.add_argument("--no_bboxes", action="store_true")
+    p.add_argument("--rel_arrow_linewidth", type=float, default=None)
+    p.add_argument("--rel_arrow_mutation_scale", type=float, default=None)
+    p.add_argument(
+        "--auto_scale_styles",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p.add_argument("--style_ref_px", type=int, default=None)
+    p.add_argument("--style_scale_min", type=float, default=None)
+    p.add_argument("--style_scale_max", type=float, default=None)
+    p.add_argument("--obj_fontsize_inside_min", type=int, default=None)
+    p.add_argument("--obj_fontsize_outside_min", type=int, default=None)
+    p.add_argument("--rel_fontsize_min", type=int, default=None)
+    p.add_argument(
+        "--render_variants_json",
+        type=str,
+        default="",
+        help="JSON object mapping variant names to VisualizerConfig overrides",
+    )
+    p.add_argument(
+        "--resolve_overlaps",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    p.add_argument("--show_bboxes", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--no_bboxes", action="store_true", default=None)
     p.add_argument("--no_masks", action="store_true")
     p.add_argument("--no_instances", action="store_true")
     p.add_argument("--show_confidence", action="store_true")
@@ -105,11 +159,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--save_without_background", action="store_true")
 
     # Colors
-    p.add_argument("--color_sat_boost", type=float, default=1.30)
-    p.add_argument("--color_val_boost", type=float, default=1.15)
+    p.add_argument("--color_sat_boost", type=float, default=None)
+    p.add_argument("--color_val_boost", type=float, default=None)
 
     # Mask post-processing
-    p.add_argument("--close_holes", action="store_true")
+    p.add_argument("--close_holes", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument("--hole_kernel", type=int, default=7)
     p.add_argument("--min_hole_area", type=int, default=100)
 
@@ -121,7 +175,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--export_preproc_only", action="store_true")
 
     # Cache
-    p.add_argument("--enable_detection_cache", action="store_true")
+    p.add_argument(
+        "--enable_detection_cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     p.add_argument("--max_cache_size", type=int, default=100)
     p.add_argument("--clear_cache", action="store_true")
 
@@ -133,15 +191,44 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--no_progress", action="store_true")
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip rows whose complete graph/render outputs already exist",
+    )
     p.add_argument("--version", action="store_true")
 
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def _merge_cfg_from_dict(cfg: PreprocessorConfig, data: Dict[str, Any]) -> None:
     for k, v in (data or {}).items():
         if hasattr(cfg, k):
             setattr(cfg, k, v)
+
+
+# Config attribute -> CLI dest, for the few options whose names differ.
+_CFG_ATTR_TO_CLI_DEST = {
+    "threshold_owl": "owl_threshold",
+    "threshold_yolo": "yolo_threshold",
+    "threshold_detectron": "detectron_threshold",
+    "threshold_grounding_dino": "grounding_dino_threshold",
+    "detectors_to_use": "detectors",
+    "apply_question_filter": "disable_question_filter",
+    "filter_relations_by_question": "no_filter_relations_by_question",
+    "display_legend": "no_legend",
+    "show_bboxes": "no_bboxes",
+    "preproc_device": "preproc_device",
+}
+
+
+def _explicit_cli_dests(argv: list[str]) -> set:
+    """Dest names of options the user actually typed on the command line."""
+    dests = set()
+    for tok in argv:
+        if tok.startswith("--"):
+            dests.add(tok[2:].split("=", 1)[0].replace("-", "_"))
+    return dests
 
 
 def _load_config_file(path: str) -> Dict[str, Any]:
@@ -182,7 +269,7 @@ def _apply_optional_flags(cfg: PreprocessorConfig, args: argparse.Namespace) -> 
 
 
 def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
-    cfg = default_config()
+    cfg = default_config(profile=args.profile)
 
     # I/O
     cfg.input_path = args.input_path
@@ -215,7 +302,15 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
 
     # Relations
     cfg.max_relations_per_object = int(args.max_relations_per_object)
-    cfg.min_relations_per_object = int(args.min_relations_per_object)
+    if args.min_relations_per_object is not None:
+        cfg.min_relations_per_object = int(args.min_relations_per_object)
+    if args.relation_selection_policy is not None:
+        cfg.relation_selection_policy = args.relation_selection_policy
+    if args.paper_ranked_max_relations is not None:
+        cfg.paper_ranked_max_relations = int(args.paper_ranked_max_relations)
+    if args.paper_fasttext_path is not None:
+        cfg.paper_fasttext_path = args.paper_fasttext_path
+    cfg.targeted_owl_threshold = float(args.targeted_owl_threshold)
     cfg.margin = int(args.margin)
     cfg.min_distance = float(args.min_distance)
     cfg.max_distance = float(args.max_distance)
@@ -225,13 +320,17 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.seg_iou_threshold = float(args.seg_iou_threshold)
     cfg.wbf_iou_threshold = float(args.wbf_iou_threshold)
     cfg.skip_box_threshold = float(args.skip_box_threshold)
+    cfg.paper_faithful_fusion = bool(args.paper_faithful_fusion)
+    cfg.early_nms_threshold = float(args.early_nms_threshold)
     cfg.cross_class_iou_threshold = float(args.cross_class_iou_threshold)
-    cfg.same_class_iou_threshold = float(args.same_class_iou_threshold)
+    if args.same_class_iou_threshold is not None:
+        cfg.same_class_iou_threshold = float(args.same_class_iou_threshold)
     cfg.cross_class_score_diff_threshold = float(args.cross_class_score_diff_threshold)
     cfg.cascade_conf_threshold = float(args.cascade_conf_threshold)
     cfg.detection_mask_merge_iou_thr = float(args.detection_mask_merge_iou_thr)
     cfg.clip_cache_max_age_days = float(args.clip_cache_max_age_days)
-    cfg.keep_non_competing_low_scores = bool(args.keep_non_competing_low_scores)
+    if args.keep_non_competing_low_scores is not None:
+        cfg.keep_non_competing_low_scores = bool(args.keep_non_competing_low_scores)
     cfg.non_competing_iou_threshold = float(args.non_competing_iou_threshold)
     cfg.non_competing_min_score = float(args.non_competing_min_score)
 
@@ -246,36 +345,76 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
 
     # Visualization
     cfg.label_mode = args.label_mode
-    cfg.display_labels = bool(args.display_labels)
-    cfg.display_relationships = bool(args.display_relationships)
-    cfg.display_relation_labels = bool(args.display_relation_labels)
+    if args.display_labels is not None:
+        cfg.display_labels = bool(args.display_labels)
+    if args.display_relationships is not None:
+        cfg.display_relationships = bool(args.display_relationships)
+    if args.display_relation_labels is not None:
+        cfg.display_relation_labels = bool(args.display_relation_labels)
 
     if args.no_instances:
         cfg.show_segmentation = False
         cfg.show_bboxes = False
     else:
-        cfg.show_segmentation = bool(args.show_segmentation) and not args.no_masks
-        cfg.show_bboxes = not args.no_bboxes
+        if args.show_segmentation is not None:
+            cfg.show_segmentation = bool(args.show_segmentation)
+        cfg.show_segmentation = cfg.show_segmentation and not args.no_masks
+        if args.show_bboxes is not None:
+            cfg.show_bboxes = bool(args.show_bboxes)
+        if args.no_bboxes:
+            cfg.show_bboxes = False
 
-    cfg.fill_segmentation = bool(args.fill_segmentation)
-    cfg.display_legend = not args.no_legend
-    cfg.seg_fill_alpha = float(args.seg_fill_alpha)
-    cfg.bbox_linewidth = float(args.bbox_linewidth)
-    cfg.obj_fontsize_inside = int(args.obj_fontsize_inside)
-    cfg.obj_fontsize_outside = int(args.obj_fontsize_outside)
-    cfg.rel_fontsize = int(args.rel_fontsize)
+    if args.fill_segmentation is not None:
+        cfg.fill_segmentation = bool(args.fill_segmentation)
+    if args.no_legend:
+        cfg.display_legend = False
+    if args.seg_fill_alpha is not None:
+        cfg.seg_fill_alpha = float(args.seg_fill_alpha)
+    if args.bbox_linewidth is not None:
+        cfg.bbox_linewidth = float(args.bbox_linewidth)
+    if args.obj_fontsize_inside is not None:
+        cfg.obj_fontsize_inside = int(args.obj_fontsize_inside)
+    if args.obj_fontsize_outside is not None:
+        cfg.obj_fontsize_outside = int(args.obj_fontsize_outside)
+    if args.rel_fontsize is not None:
+        cfg.rel_fontsize = int(args.rel_fontsize)
     cfg.legend_fontsize = int(args.legend_fontsize)
-    cfg.rel_arrow_linewidth = float(args.rel_arrow_linewidth)
-    cfg.rel_arrow_mutation_scale = float(args.rel_arrow_mutation_scale)
-    cfg.resolve_overlaps = bool(args.resolve_overlaps)
+    if args.rel_arrow_linewidth is not None:
+        cfg.rel_arrow_linewidth = float(args.rel_arrow_linewidth)
+    if args.rel_arrow_mutation_scale is not None:
+        cfg.rel_arrow_mutation_scale = float(args.rel_arrow_mutation_scale)
+    if args.auto_scale_styles is not None:
+        cfg.auto_scale_styles = bool(args.auto_scale_styles)
+    if args.style_ref_px is not None:
+        cfg.style_ref_px = int(args.style_ref_px)
+    if args.style_scale_min is not None:
+        cfg.style_scale_min = float(args.style_scale_min)
+    if args.style_scale_max is not None:
+        cfg.style_scale_max = float(args.style_scale_max)
+    if args.obj_fontsize_inside_min is not None:
+        cfg.obj_fontsize_inside_min = int(args.obj_fontsize_inside_min)
+    if args.obj_fontsize_outside_min is not None:
+        cfg.obj_fontsize_outside_min = int(args.obj_fontsize_outside_min)
+    if args.rel_fontsize_min is not None:
+        cfg.rel_fontsize_min = int(args.rel_fontsize_min)
+    if args.render_variants_json:
+        variants = _load_config_file(args.render_variants_json)
+        if not isinstance(variants, dict):
+            raise ValueError("--render_variants_json must contain a JSON object")
+        cfg.render_variants = variants
+    if args.resolve_overlaps is not None:
+        cfg.resolve_overlaps = bool(args.resolve_overlaps)
     cfg.show_confidence = bool(args.show_confidence)
 
     # Colors
-    cfg.color_sat_boost = float(args.color_sat_boost)
-    cfg.color_val_boost = float(args.color_val_boost)
+    if args.color_sat_boost is not None:
+        cfg.color_sat_boost = float(args.color_sat_boost)
+    if args.color_val_boost is not None:
+        cfg.color_val_boost = float(args.color_val_boost)
 
     # Mask post-processing
-    cfg.close_holes = bool(args.close_holes)
+    if args.close_holes is not None:
+        cfg.close_holes = bool(args.close_holes)
     cfg.hole_kernel = int(args.hole_kernel)
     cfg.min_hole_area = int(args.min_hole_area)
 
@@ -289,10 +428,12 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.save_without_background = bool(args.save_without_background)
 
     # Cache
-    cfg.enable_detection_cache = bool(args.enable_detection_cache)
+    if args.enable_detection_cache is not None:
+        cfg.enable_detection_cache = bool(args.enable_detection_cache)
     cfg.max_cache_size = int(args.max_cache_size)
 
     _apply_optional_flags(cfg, args)
+    cfg.resume_existing_outputs = bool(args.resume)
     return cfg
 
 
@@ -310,24 +451,37 @@ def _setup_logging(verbosity: int) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args()
+    args = _parse_args(argv)
     _setup_logging(int(args.verbose or 0))
 
     if args.version:
         print("Image Graph Preprocessor")
         return 0
 
-    cfg = default_config()
+    cfg = _build_config(args)
 
     if args.config:
+        # Precedence: CLI defaults < config file < explicitly passed CLI flags.
         try:
             overrides = _load_config_file(args.config)
+            explicit = _explicit_cli_dests(argv if argv is not None else sys.argv[1:])
+            overrides = {
+                k: v for k, v in overrides.items()
+                if _CFG_ATTR_TO_CLI_DEST.get(k, k) not in explicit
+            }
             _merge_cfg_from_dict(cfg, overrides)
         except Exception as e:
             logging.error(f"Failed to load config: {e}")
             return 2
 
-    cfg = _build_config(args)
+    if cfg.profile == "paper_aaai26":
+        try:
+            from gom.config import validate_paper_config
+
+            validate_paper_config(cfg)
+        except Exception as e:
+            logging.error(str(e))
+            return 2
 
     if args.save_config:
         try:

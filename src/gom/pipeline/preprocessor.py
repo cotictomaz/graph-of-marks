@@ -289,14 +289,17 @@ License: See repository LICENSE file
 from __future__ import annotations
 
 import contextlib
+import copy
 import gc
+import hashlib
 import json
 import logging
 import math
 import os
+import re
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -359,8 +362,8 @@ from gom.utils.depth import DepthConfig, DepthEstimator
 
 
 def build_scene_graph(
-    image_size: Tuple[int, int],
-    boxes: Sequence[Sequence[float]], 
+    image: "Image.Image",
+    boxes: Sequence[Sequence[float]],
     labels: Sequence[str],
     scores: Sequence[float],
     depths: Optional[Sequence[float]] = None,
@@ -368,26 +371,26 @@ def build_scene_graph(
 ) -> "nx.DiGraph":
     """
     Construct a NetworkX scene graph from detection results.
-    
-    Thin wrapper around SceneGraphBuilder.build() for backward compatibility.
-    
+
+    Thin wrapper around SceneGraphBuilder.build().
+
     Args:
-        image_size: (width, height) of the image
+        image: PIL image of the scene (used for node colors / crops)
         boxes: List of bounding boxes in [x1, y1, x2, y2] format
         labels: Object class labels
         scores: Detection confidence scores
-        depths: Optional depth values for z-ordering
+        depths: Precomputed per-object depth values in [0, 1] (higher = closer)
         caption: Optional image caption
-    
+
     Returns:
         NetworkX DiGraph with nodes for objects and edges for relationships
     """
-    W, H = image_size
-    # Create a dummy white image (builder only needs size/crops)
-    image = Image.new('RGB', (W, H), color='white')
-    
-    builder = _SceneGraphBuilder()
-    return builder.build(image, boxes, labels, scores)
+    from gom.graph.scene_graph import SceneGraphConfig
+
+    # CLIP embeddings are skipped here: no CLIP instance is wired into the
+    # builder, and edge selection is driven by the relation engine downstream.
+    builder = _SceneGraphBuilder(config=SceneGraphConfig(store_clip_embeddings=False))
+    return builder.build(image, boxes, labels, scores, depths=depths, caption=caption)
 
 # Alias for prompt serialization compatibility
 to_triples_text = graph_to_triples_text
@@ -397,6 +400,70 @@ from gom.viz.visualizer import Visualizer, VisualizerConfig
 
 
 # ----------------------------- Configuration -----------------------------
+def rank_paper_relations(
+    relationships: Sequence[Dict[str, Any]],
+    *,
+    question_rel_terms: Optional[Set[str]] = None,
+    question_subject_idxs: Optional[Set[int]] = None,
+    question_candidate_idxs: Optional[Set[int]] = None,
+    max_total: int = 16,
+) -> List[Dict[str, Any]]:
+    """Rank existing edges as Algorithm 3 describes, without inventing edges."""
+    requested = {
+        str(term).strip().lower().replace(" ", "_")
+        for term in (question_rel_terms or set())
+    }
+    subjects = question_subject_idxs or set()
+    candidates = question_candidate_idxs or set()
+    relation_priority = {
+        "on_top_of": 4,
+        "under": 4,
+        "touching": 3,
+        "adjacent": 3,
+        "left_of": 2,
+        "right_of": 2,
+        "above": 2,
+        "below": 2,
+        "in_front_of": 1,
+        "behind": 1,
+        "near": 1,
+        "next_to": 1,
+    }
+
+    def confidence(relation: Dict[str, Any]) -> float:
+        for key in ("clip_sim", "score", "confidence"):
+            value = relation.get(key)
+            if value is not None:
+                return float(value)
+        distance = float(relation.get("distance", 1e9))
+        return 1.0 / (1.0 + distance / 100.0)
+
+    def sort_key(relation: Dict[str, Any]) -> tuple:
+        label = str(relation.get("relation", "")).strip().lower().replace(" ", "_")
+        requested_match = int(label in requested)
+        endpoint_match = int(
+            (not candidates or relation.get("src_idx") in candidates)
+            and (not subjects or relation.get("tgt_idx") in subjects)
+        )
+        priority = relation_priority.get(label, 0)
+        distance = float(relation.get("distance", 1e9))
+        return (
+            -requested_match,
+            -endpoint_match,
+            -priority,
+            -confidence(relation),
+            distance,
+            int(relation.get("src_idx", -1)),
+            int(relation.get("tgt_idx", -1)),
+            label,
+        )
+
+    ranked = sorted((dict(relation) for relation in relationships), key=sort_key)
+    if max_total > 0:
+        ranked = ranked[:max_total]
+    return ranked
+
+
 @dataclass
 class PreprocessorConfig:
     """
@@ -410,6 +477,8 @@ class PreprocessorConfig:
     - Dataset: Batch processing configuration
     - Question filtering: VQA-aware pruning
     """
+    profile: str = "quality_vqa"
+
     # I/O paths
     input_path: Optional[str] = None
     json_file: str = ""
@@ -426,6 +495,22 @@ class PreprocessorConfig:
     apply_question_filter: bool = True
     aggressive_pruning: bool = False
     filter_relations_by_question: bool = True
+    targeted_open_vocabulary: bool = True
+    targeted_owl_threshold: float = 0.20
+    singleton_filtering_enabled: bool = False
+    quality_question_pruning: bool = True
+    render_question_relations_only: bool = True
+    relation_selection_policy: str = "question_only"
+    paper_ranked_max_relations: int = 16
+    paper_direction_margin: float = 20.0
+    paper_depth_threshold: float = 0.10
+    paper_near_threshold: float = 5000.0
+    paper_touching_iou_threshold: float = 0.10
+    paper_touching_gap_threshold: float = 3.0
+    paper_very_close_threshold: float = 0.05
+    paper_close_threshold: float = 0.12
+    paper_fasttext_path: Optional[str] = None
+    paper_require_fasttext: bool = False
     threshold_object_similarity: float = 0.50  # Min CLIP similarity for object filtering
     threshold_relation_similarity: float = 0.50  # Min CLIP similarity for relation filtering
     singleton_max_target_distance_ratio: float = 0.6  # Max target-object distance ratio (diag) in singleton mode
@@ -442,15 +527,15 @@ class PreprocessorConfig:
     context_min_iou: float = 0.1  # Minimum overlap to consider objects contextual
     false_negative_reduction: bool = True  # Apply heuristics to prevent over-pruning
     min_objects_per_question: int = 3  # Minimum objects to retain (avoid empty results)
-    max_objects_per_question: int = 50  # Maximum objects to retain (performance cap)
+    max_objects_per_question: int = 10  # Paper render cap; count questions expand to per-label cap
 
     # Detection models and confidence thresholds
     detectors_to_use: Tuple[str, ...] = ("owlvit", "yolov8", "detectron2")
-    # Conservative defaults to reduce false positives and noise
-    threshold_owl: float = 0.60  # OWL-ViT confidence threshold
-    threshold_yolo: float = 0.85  # YOLOv8 confidence threshold
-    threshold_detectron: float = 0.85  # Detectron2 confidence threshold
-    auto_detector_thresholds: bool = True  # Auto-tune detector thresholds per image
+    threshold_owl: float = 0.50  # OWL-ViT confidence threshold
+    owl_model_revision: Optional[str] = None
+    threshold_yolo: float = 0.50  # YOLOv8 confidence threshold
+    threshold_detectron: float = 0.50  # Detectron2 confidence threshold
+    auto_detector_thresholds: bool = False  # Auto-tune detector thresholds per image
     auto_threshold_min_default: float = 0.25  # Floor for auto thresholding
     auto_threshold_min_owl: float = 0.25
     auto_threshold_min_yolo: float = 0.25
@@ -465,19 +550,29 @@ class PreprocessorConfig:
     grounding_dino_text_threshold: float = 0.25  # Text-box alignment threshold
 
     # Per-object relationship limits
-    max_relations_per_object: int = 5  # Maximum relationships to extract per object
-    min_relations_per_object: int = 1  # Minimum relationships to keep per object
+    max_relations_per_object: int = 3  # Maximum relationships to extract per object
+    min_relations_per_object: int = 0  # Do not invent relations merely to meet a quota
 
     # CLIP embedding cache configuration
     clip_cache_max_age_days: Optional[float] = 30.0  # Disk cache TTL in days
 
-    # NMS and fusion parameters (aggressive settings to reduce overlap)
-    label_nms_threshold: float = 0.25  # Label-wise NMS IoU threshold (was 0.60)
-    seg_iou_threshold: float = 0.50    # Segmentation IoU for duplicate removal (was 0.70)
-    wbf_iou_threshold: float = 0.10    # Weighted Boxes Fusion IoU threshold
-    cross_class_suppression: bool = True  # Remove overlaps between different classes
+    # NMS and fusion parameters
+    label_nms_threshold: float = 0.50  # Label-wise NMS IoU threshold
+    apply_label_nms: bool = True  # Extra post-WBF per-label NMS
+    seg_iou_threshold: float = 0.50    # Segmentation IoU for duplicate removal
+    wbf_iou_threshold: float = 0.90    # Weighted Boxes Fusion IoU threshold
+    ensemble_detector_weights: Dict[str, float] = field(
+        default_factory=lambda: {"owlvit": 2.0, "yolov8": 1.5, "detectron2": 1.0}
+    )
+    # Paper-faithful detection fusion (c438ebc): raw concat of all detectors + per-class
+    # greedy NMS, NO WBF / cross-class / group-merge / semantic-dedup cascades. Opt-in so
+    # default gom behavior is unchanged. Paper call site uses early_nms_threshold=0.5.
+    paper_faithful_fusion: bool = False
+    early_nms_threshold: float = 0.50  # per-class NMS IoU applied right after fusion (paper)
+    cross_class_suppression: bool = False  # Remove overlaps between different classes (aggressive; off by default)
     cross_class_iou_threshold: float = 0.65  # IoU threshold for cross-class suppression
     same_class_iou_threshold: float = 0.30  # IoU threshold for same-class deduplication (lower = more aggressive)
+    same_class_mask_iou_threshold: float = 0.80
     cross_class_score_diff_threshold: float = 0.80  # Score difference ratio threshold for cross-class dedup (1.0 = disable)
     enable_group_merge: bool = True    # Merge highly overlapping detections
     merge_mask_iou_threshold: float = 0.50  # Mask IoU for merging (was 0.6)
@@ -488,19 +583,21 @@ class PreprocessorConfig:
     semantic_dedup_iou_threshold: float = 0.40  # IoU threshold for semantic deduplication
     enable_containment_removal: bool = True  # Remove boxes fully contained in others
     containment_threshold: float = 0.90  # Area overlap percentage for containment
+    enable_mask_quality_filter: bool = False  # Drop detections whose SAM masks look low-quality (aggressive; off by default)
+    post_segmentation_dedup: bool = True
 
     # Geometric parameters (in pixels)
     margin: int = 20  # Margin around objects for spatial relationships
-    min_distance: float = 50  # Minimum distance for relationship consideration
+    min_distance: float = 10  # Minimum distance for relationship consideration
     max_distance: float = 20000  # Maximum distance for relationship consideration
 
     # SAM segmentation settings
-    sam_version: str = "1"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
+    sam_version: str = "hq"  # SAM variant: "1" (original), "2" (SAM2), "hq" (SAM-HQ)
     segmenter_kwargs: Dict[str, Any] = field(default_factory=dict)  # Extra args for segmenter
     sam_hq_model_type: str = "vit_h"  # SAM-HQ model size
     points_per_side: int = 32  # Grid density for automatic mask generation
-    pred_iou_thresh: float = 0.88  # Predicted IoU threshold for mask quality
-    stability_score_thresh: float = 0.95  # Stability score threshold
+    pred_iou_thresh: float = 0.90  # Predicted IoU threshold for mask quality
+    stability_score_thresh: float = 0.92  # Stability score threshold
     min_mask_region_area: int = 100  # Minimum mask area in pixels
     
     # Detector parallelism and pruning limits
@@ -522,6 +619,7 @@ class PreprocessorConfig:
     # Computation device
     preproc_device: Optional[str] = None  # PyTorch device (None = auto-detect)
     force_preprocess_per_question: bool = False  # Reprocess for each question
+    resume_existing_outputs: bool = False
 
     # Logging and verbosity
     verbose: bool = False  # Enable detailed console logging
@@ -533,18 +631,30 @@ class PreprocessorConfig:
     display_relationships: bool = True  # Show relationship arrows
     display_relation_labels: bool = True  # Show text on relationship arrows
     show_segmentation: bool = True  # Render segmentation masks
-    fill_segmentation: bool = True  # Fill masks (vs outline only)
+    fill_segmentation: bool = False  # Outline-only preserves image evidence for VQA
     display_legend: bool = False  # Show legend with object classes
-    seg_fill_alpha: float = 0.25  # Segmentation transparency (0=invisible, 1=opaque)
+    seg_fill_alpha: float = 0.0  # Segmentation transparency (0=invisible, 1=opaque)
     bbox_linewidth: float = 2.0  # Bounding box line width
-    obj_fontsize_inside: int = 9  # Font size for inside labels
-    obj_fontsize_outside: int = 10  # Font size for outside labels
-    rel_fontsize: int = 8  # Font size for relationship labels
+    obj_fontsize_inside: int = 14  # Readable at common VQA image resolutions
+    obj_fontsize_outside: int = 14
+    rel_fontsize: int = 12
     legend_fontsize: int = 8  # Font size for legend
     rel_arrow_linewidth: float = 2.0  # Relationship arrow line width
     rel_arrow_mutation_scale: float = 26.0  # Relationship arrow head size
+    label_bbox_linewidth: float = 3.0
+    relation_label_bbox_linewidth: float = 3.0
+    filter_redundant_relations: bool = True
+    cap_relations_per_object: bool = False
+    auto_scale_styles: bool = True
+    style_ref_px: int = 1000
+    style_scale_min: float = 0.5
+    style_scale_max: float = 2.0
+    obj_fontsize_inside_min: int = 10
+    obj_fontsize_outside_min: int = 10
+    rel_fontsize_min: int = 9
+    render_variants: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     resolve_overlaps: bool = True  # Auto-adjust overlapping labels
-    show_bboxes: bool = True  # Show bounding boxes
+    show_bboxes: bool = False  # Segmentation contours are less visually destructive
     show_confidence: bool = False  # Display confidence scores in labels
 
     # Mask post-processing
@@ -570,8 +680,8 @@ class PreprocessorConfig:
     max_cache_size: int = 100  # Maximum cached images
 
     # Detection image resizing (for faster inference)
-    detection_resize: bool = True  # Resize images before detection
-    detection_max_side: int = 800  # Maximum dimension for resized images
+    detection_resize: bool = False  # Resize images before detection (off: detect at full resolution)
+    detection_max_side: int = 800  # Maximum dimension for resized images (when resize enabled)
     detection_hash_method: str = "thumb"  # Cache key method: "thumb", "full"
     
     # Cross-class suppression (remove overlaps between different classes)
@@ -649,6 +759,15 @@ class ImageGraphPreprocessor:
             - Sets up caching and optimization features
         """
         self.cfg = config
+        if self.cfg.relation_selection_policy not in {
+            "question_only",
+            "paper_ranked",
+            "paper_algorithm",
+        }:
+            raise ValueError(
+                "relation_selection_policy must be 'question_only', 'paper_ranked', "
+                "or 'paper_algorithm'"
+            )
         # Configure logger for this instance
         self.logger = logging.getLogger(__name__)
         try:
@@ -776,6 +895,19 @@ class ImageGraphPreprocessor:
                 bbox_linewidth=self.cfg.bbox_linewidth,
                 rel_arrow_linewidth=self.cfg.rel_arrow_linewidth,
                 rel_arrow_mutation_scale=self.cfg.rel_arrow_mutation_scale,
+                label_bbox_linewidth=self.cfg.label_bbox_linewidth,
+                relation_label_bbox_linewidth=self.cfg.relation_label_bbox_linewidth,
+                filter_redundant_relations=self.cfg.filter_redundant_relations,
+                cap_relations_per_object=self.cfg.cap_relations_per_object,
+                max_relations_per_object=self.cfg.max_relations_per_object,
+                min_relations_per_object=self.cfg.min_relations_per_object,
+                auto_scale_styles=self.cfg.auto_scale_styles,
+                style_ref_px=self.cfg.style_ref_px,
+                style_scale_min=self.cfg.style_scale_min,
+                style_scale_max=self.cfg.style_scale_max,
+                obj_fontsize_inside_min=self.cfg.obj_fontsize_inside_min,
+                obj_fontsize_outside_min=self.cfg.obj_fontsize_outside_min,
+                rel_fontsize_min=self.cfg.rel_fontsize_min,
                 resolve_overlaps=self.cfg.resolve_overlaps,
                 color_sat_boost=self.cfg.color_sat_boost,
                 color_val_boost=self.cfg.color_val_boost,
@@ -903,7 +1035,8 @@ class ImageGraphPreprocessor:
                 )
             dets.append(OwlViTDetector(
                 device=self.device,
-                score_threshold=self.cfg.threshold_owl
+                score_threshold=self.cfg.threshold_owl,
+                revision=self.cfg.owl_model_revision,
             ))
 
         if "yolov8" in names:
@@ -1120,7 +1253,7 @@ class ImageGraphPreprocessor:
 
     # ----------------------------- Detection Execution -----------------------------
 
-    def _run_detectors(self, image_pil: Image.Image) -> Dict[str, Any]:
+    def _run_detectors(self, image_pil: Image.Image, question_intent=None) -> Dict[str, Any]:
         """
         Execute all configured detectors and aggregate results for fusion.
         
@@ -1165,11 +1298,15 @@ class ImageGraphPreprocessor:
                 # Lower IoU prevents merging nearby small objects (cups, glasses)
                 # Lower skip threshold keeps low-confidence detections
                 wbf_iou = getattr(self.cfg, 'wbf_iou_threshold', 0.25)
-                self.logger.info(f"[DEBUG WBF PARAM] wbf_iou_threshold={wbf_iou}") 
+                self.logger.info(f"[DEBUG WBF PARAM] wbf_iou_threshold={wbf_iou}")
                 skip_thr = getattr(self.cfg, 'skip_box_threshold', 0.10)
-                self.logger.info(f"[DEBUG WBF] Passing to detect_ensemble: iou_thr={wbf_iou}")
+                # Paper-faithful path: bypass WBF + post-fusion cascades entirely and
+                # return raw concatenated detections (dedup happens below via per-class NMS).
+                paper_mode = getattr(self.cfg, 'paper_faithful_fusion', False)
+                self.logger.info(f"[DEBUG WBF] detect_ensemble: fuse={not paper_mode} iou_thr={wbf_iou}")
                 det_lists = self.detector_manager.detect_ensemble(
-                    [det_img], 
+                    [det_img],
+                    fuse=not paper_mode,
                     iou_thr=wbf_iou,
                     skip_box_thr=skip_thr
                 )
@@ -1206,7 +1343,25 @@ class ImageGraphPreprocessor:
                         'mask': mask,
                     })
 
-                if self.cfg.auto_detector_thresholds:
+                all_dets = self._append_targeted_open_vocab(
+                    all_dets, det_img, det_scale, question_intent, counts
+                )
+
+                # Paper-faithful dedup: per-class greedy NMS on the raw concat (mirrors
+                # ImageGraphPreprocessor._deduplicate_detections at early_nms_threshold=0.5).
+                if paper_mode and all_dets:
+                    early_iou = float(getattr(self.cfg, 'early_nms_threshold', 0.5))
+                    keep = labelwise_nms(
+                        [d['box'] for d in all_dets],
+                        [d['label'] for d in all_dets],
+                        [d['score'] for d in all_dets],
+                        iou_threshold=early_iou,
+                    )
+                    all_dets = [all_dets[i] for i in keep]
+                    self.logger.info(
+                        f"[PAPER-FUSION] {len(all_dets)} objects after per-class NMS@{early_iou}"
+                    )
+                elif self.cfg.auto_detector_thresholds:
                     all_dets, counts = self._auto_filter_detections(all_dets, counts)
                 if restore_thresholds is not None:
                     self._restore_detector_thresholds(restore_thresholds)
@@ -1273,6 +1428,10 @@ class ImageGraphPreprocessor:
                     "mask": d.extra.get("mask") if d.extra else None,
                 })
 
+        all_dets = self._append_targeted_open_vocab(
+            all_dets, det_img, det_scale, question_intent, counts
+        )
+
         if restore_thresholds is not None:
             self._restore_detector_thresholds(restore_thresholds)
         if self.cfg.auto_detector_thresholds:
@@ -1284,6 +1443,58 @@ class ImageGraphPreprocessor:
             "labels": [d["label"] for d in all_dets],
             "scores": [d["score"] for d in all_dets],
         }
+
+    def _append_targeted_open_vocab(
+        self,
+        detections: List[Dict[str, Any]],
+        detector_image: Image.Image,
+        detector_scale: float,
+        question_intent,
+        counts: Dict[str, int],
+    ) -> List[Dict[str, Any]]:
+        """Add question-specific OWLv2 candidates without mutating global queries."""
+        if (
+            not getattr(self.cfg, "targeted_open_vocabulary", True)
+            or question_intent is None
+            or not getattr(question_intent, "detector_queries", ())
+        ):
+            return detections
+
+        owl = next(
+            (det for det in self.detectors if isinstance(det, OwlViTDetector)),
+            None,
+        )
+        if owl is None or not hasattr(owl, "detect_with_queries"):
+            return detections
+
+        try:
+            candidates = owl.detect_with_queries(
+                detector_image, question_intent.detector_queries
+            )
+        except Exception:
+            self.logger.exception("Question-targeted OWLv2 detection failed")
+            return detections
+
+        threshold = float(getattr(self.cfg, "targeted_owl_threshold", 0.20))
+        added = 0
+        for detection in candidates:
+            score = float(getattr(detection, "score", 0.0))
+            if score < threshold:
+                continue
+            box = list(detection.box)
+            if detector_scale and detector_scale < 1.0:
+                inv = 1.0 / detector_scale
+                box = [float(value * inv) for value in box]
+            detections.append({
+                "box": box,
+                "label": str(detection.label),
+                "score": score,
+                "from": "owlvit_targeted",
+                "mask": None,
+            })
+            added += 1
+        counts["owlvit_targeted"] = counts.get("owlvit_targeted", 0) + added
+        return detections
     
     def _run_detectors_batch(self, images: List[Image.Image]) -> List[Dict[str, Any]]:
         """
@@ -1469,7 +1680,12 @@ class ImageGraphPreprocessor:
         """
         if not torch.cuda.is_available():
             return 1
-        
+
+        # Full-resolution detection (detection_resize=False) batches huge tensors
+        # through the detectors; detect one image at a time to avoid stalls.
+        if not getattr(self.cfg, "detection_resize", False):
+            return 1
+
         try:
             gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
 
@@ -2225,8 +2441,12 @@ class ImageGraphPreprocessor:
         depths: Optional[List] = None,
         iou_threshold: float = 0.7,
         mask_iou_threshold: float = 0.6,
+        same_class_mask_iou_threshold: float = 0.8,
+        containment_threshold: float = 0.9,
+        enable_containment_removal: bool = True,
         cross_class_score_diff_threshold: float = 0.80,
         target_indices: Optional[Set[int]] = None,
+        cross_class: bool = True,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
         """
         Remove highly overlapping objects (both same-class and cross-class).
@@ -2317,22 +2537,32 @@ class ImageGraphPreprocessor:
                 i_is_target = target_indices is not None and i in target_indices
                 j_is_target = target_indices is not None and j in target_indices
 
-                if same_class:
-                    print(f"  [DEBUG] Same-class pair: {labels[i]} ({scores[i]:.3f}) vs {labels[j]} ({scores[j]:.3f}), IoU={box_iou:.3f}, threshold={iou_threshold:.3f}, remove? {box_iou >= iou_threshold}")
-                
-                if same_class and box_iou >= iou_threshold:
+                mask_overlap = 0.0
+                if masks and i < len(masks) and j < len(masks):
+                    mask_overlap = compute_mask_iou(masks[i], masks[j])
+                same_class_duplicate = same_class and (
+                    box_iou >= iou_threshold
+                    or mask_overlap >= same_class_mask_iou_threshold
+                    or (
+                        enable_containment_removal
+                        and
+                        max(overlap_i, overlap_j) >= containment_threshold
+                    )
+                )
+
+                if same_class_duplicate:
                     # Same class with high overlap -> keep higher score
                     # BUT: If one is a target in singleton mode, ALWAYS keep it
                     if i_is_target and not j_is_target:
                         # i is target -> remove j regardless of score
                         keep.discard(j)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps TARGET {labels[i]}, IoU={box_iou:.3f})")
+                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps TARGET {labels[i]}, box IoU={box_iou:.3f}, mask IoU={mask_overlap:.3f})")
                     elif j_is_target and not i_is_target:
                         # j is target -> remove i regardless of score
                         keep.discard(i)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps TARGET {labels[j]}, IoU={box_iou:.3f})")
+                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps TARGET {labels[j]}, box IoU={box_iou:.3f}, mask IoU={mask_overlap:.3f})")
                         break
                     elif i_is_target and j_is_target:
                         # Both are targets -> keep both (don't remove)
@@ -2340,14 +2570,14 @@ class ImageGraphPreprocessor:
                     elif scores[i] >= scores[j]:
                         keep.discard(j)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]} with IoU={box_iou:.3f})")
+                        print(f"  [DEDUP] Removed {labels[j]} (score={scores[j]:.3f}, overlaps {labels[i]}, box IoU={box_iou:.3f}, mask IoU={mask_overlap:.3f})")
                     else:
                         keep.discard(i)
                         removed_count += 1
-                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]} with IoU={box_iou:.3f})")
+                        print(f"  [DEDUP] Removed {labels[i]} (score={scores[i]:.3f}, overlaps {labels[j]}, box IoU={box_iou:.3f}, mask IoU={mask_overlap:.3f})")
                         break  # i was removed, no need to check more pairs with i
                 
-                elif not same_class and box_iou >= 0.10:
+                elif cross_class and not same_class and box_iou >= 0.10:
                     # Different classes with overlap -> check if one is likely a false positive
                     # Strategy: remove if:
                     # 1. High box/mask IoU (clear spatial overlap)
@@ -2752,7 +2982,8 @@ class ImageGraphPreprocessor:
         question_terms: Optional[set] = None,
         clip_scores: Optional[Dict[int, float]] = None,
         image_size: Optional[Tuple[int, int]] = None,
-    ) -> Tuple[List[List[float]], List[str], List[float]]:
+        return_indices: bool = False,
+    ):
         """
         Advanced semantic pruning with CLIP-based visual-semantic ranking.
         
@@ -2818,8 +3049,14 @@ class ImageGraphPreprocessor:
             - Improves VQA accuracy by 5-10% on GQA/VQAv2
             - ~50ms overhead for CLIP scoring on 100 detections
         """
+        origin_indices = list(range(len(boxes)))
+
+        def result():
+            values = (boxes, labels, scores)
+            return values + (origin_indices,) if return_indices else values
+
         if not boxes:
-            return boxes, labels, scores
+            return result()
 
         # Filter out "picture"/"painting"/"frame" boxes that span (almost) the full image.
         if image_size is not None:
@@ -2838,12 +3075,13 @@ class ImageGraphPreprocessor:
             boxes = [boxes[i] for i in keep_idx]
             labels = [labels[i] for i in keep_idx]
             scores = [scores[i] for i in keep_idx]
+            origin_indices = [origin_indices[i] for i in keep_idx]
             if clip_scores:
                 clip_scores = {keep_idx.index(old_i): score
                                for old_i, score in clip_scores.items()
                                if old_i in keep_idx}
             if not boxes:
-                return boxes, labels, scores
+                return result()
 
         # Filter by min area (same as before)
         if self.cfg.min_box_area_px and self.cfg.min_box_area_px > 0:
@@ -2856,6 +3094,7 @@ class ImageGraphPreprocessor:
             boxes = [boxes[i] for i in kept_idx]
             labels = [labels[i] for i in kept_idx]
             scores = [scores[i] for i in kept_idx]
+            origin_indices = [origin_indices[i] for i in kept_idx]
             
             # Remap clip_scores indices after filtering
             if clip_scores:
@@ -2864,7 +3103,7 @@ class ImageGraphPreprocessor:
                               if old_i in kept_idx}
             
             if not boxes:
-                return boxes, labels, scores
+                return result()
 
         # Compute multi-signal semantic scores
         semantic_boost = {}
@@ -2924,6 +3163,7 @@ class ImageGraphPreprocessor:
             boxes = [boxes[i] for i in kept]
             labels = [labels[i] for i in kept]
             scores = [scores[i] for i in kept]
+            origin_indices = [origin_indices[i] for i in kept]
             
             # Remap semantic_boost indices
             if semantic_boost:
@@ -2970,8 +3210,9 @@ class ImageGraphPreprocessor:
             boxes = [boxes[i] for i in kept_indices]
             labels = [labels[i] for i in kept_indices]
             scores = [scores[i] for i in kept_indices]
+            origin_indices = [origin_indices[i] for i in kept_indices]
         
-        return boxes, labels, scores
+        return result()
 
     def _parse_question(self, question: str) -> Tuple[set, set]:
         """
@@ -3030,126 +3271,11 @@ class ImageGraphPreprocessor:
             - Generates both space and underscore variants for matching flexibility
             - Synonym expansion improves recall at cost of slight precision decrease
         """
-        q = (question or self.cfg.question or "").strip().lower()
-        if not q:
-            return set(), set()
+        from gom.question_intent import parse_question_intent
 
-        # Expanded stopword list for cleaner object extraction
-        stopwords = {
-            "the", "a", "an", "is", "are", "on", "in", "of", "to",
-            "what", "where", "when", "how", "which", "who", "why",
-            "this", "that", "these", "those", "there", "here",
-            "do", "does", "did", "can", "could", "would", "should",
-            "many", "much", "some", "any"
-        }
-
-        # Clean and tokenize
-        q_clean = q.replace("?", " ").replace(",", " ").replace(".", " ")
-        words = [w for w in q_clean.split() if w.isalpha() and len(w) > 1]
-
-        # Extract unigrams (filter stopwords)
-        unigrams = {w for w in words if w not in stopwords}
-
-
-        # Espansione automatica con WordNet se disponibile
-        def get_synonyms(word):
-            """Get synonyms from WordNet, gracefully handling missing corpus."""
-            try:
-                from nltk.corpus import wordnet as wn
-                syns = set()
-                for syn in wn.synsets(word):
-                    for lemma in syn.lemmas():
-                        syns.add(lemma.name().replace("_", " "))
-                return syns
-            except LookupError:
-                # WordNet corpus not downloaded - try to download it once
-                try:
-                    import nltk
-                    nltk.download('wordnet', quiet=True)
-                    nltk.download('omw-1.4', quiet=True)  # Open Multilingual Wordnet
-                    from nltk.corpus import wordnet as wn
-                    syns = set()
-                    for syn in wn.synsets(word):
-                        for lemma in syn.lemmas():
-                            syns.add(lemma.name().replace("_", " "))
-                    return syns
-                except Exception:
-                    return set()
-            except Exception:
-                return set()
-
-        obj_terms = set(unigrams)
-        for w in list(obj_terms):
-            obj_terms.update(get_synonyms(w))
-
-        # Bigrams
-        for i in range(len(words) - 1):
-            w1, w2 = words[i], words[i + 1]
-            if w1 not in stopwords or w2 not in stopwords:
-                bigram = f"{w1} {w2}"
-                obj_terms.add(bigram)
-                obj_terms.add(bigram.replace(" ", "_"))
-                obj_terms.update(get_synonyms(w1))
-                obj_terms.update(get_synonyms(w2))
-
-        # Trigrams
-        for i in range(len(words) - 2):
-            w1, w2, w3 = words[i], words[i + 1], words[i + 2]
-            if not all(w in stopwords for w in [w1, w2, w3]):
-                trigram = f"{w1} {w2} {w3}"
-                obj_terms.add(trigram)
-                obj_terms.add(trigram.replace(" ", "_"))
-                obj_terms.update(get_synonyms(w1))
-                obj_terms.update(get_synonyms(w2))
-                obj_terms.update(get_synonyms(w3))
-
-        # Bigrams
-        for i in range(len(words) - 1):
-            w1, w2 = words[i], words[i + 1]
-            if w1 not in stopwords or w2 not in stopwords:
-                bigram = f"{w1} {w2}"
-                obj_terms.add(bigram)
-                obj_terms.add(bigram.replace(" ", "_"))
-                # Espansione con sinonimi dei componenti
-                obj_terms.update(get_synonyms(w1))
-                obj_terms.update(get_synonyms(w2))
-
-        # Trigrams
-        for i in range(len(words) - 2):
-            w1, w2, w3 = words[i], words[i + 1], words[i + 2]
-            if not all(w in stopwords for w in [w1, w2, w3]):
-                trigram = f"{w1} {w2} {w3}"
-                obj_terms.add(trigram)
-                obj_terms.add(trigram.replace(" ", "_"))
-                obj_terms.update(get_synonyms(w1))
-                obj_terms.update(get_synonyms(w2))
-                obj_terms.update(get_synonyms(w3))
-
-        # Sinonimi relazioni espansi
-        rel_map = {
-            "above": {"above", "over", "higher than", "top of"},
-            "below": {"below", "under", "beneath", "lower than", "underneath"},
-            "left_of": {"left", "to the left of", "left side", "leftward"},
-            "right_of": {"right", "to the right of", "right side", "rightward"},
-            "on_top_of": {"on top of", "on", "onto", "resting on", "sitting on", "placed on", "atop"},
-            "in_front_of": {"in front of", "front", "before", "ahead of"},
-            "behind": {"behind", "back of", "rear of", "after"},
-            "next_to": {"next to", "beside", "adjacent to", "alongside", "by", "near"},
-            "touching": {"touching", "in contact with", "against"},
-            "near": {"near", "close to", "nearby", "around", "close by"},
-            "far_from": {"far from", "distant from", "away from"},
-            "inside": {"inside", "within", "in"},
-            "outside": {"outside", "out of", "beyond"},
-            "holding": {"holding", "grasping", "gripping", "carrying"},
-            "wearing": {"wearing", "dressed in", "has on"},
-        }
-
-        rel_terms = set()
-        for canonical, variants in rel_map.items():
-            if any(v in q for v in variants):
-                rel_terms.add(canonical)
-
-        return obj_terms, rel_terms
+        intent = parse_question_intent(question or self.cfg.question or "")
+        self._last_question_intent = intent
+        return set(intent.object_terms), set(intent.relation_terms)
 
     def _filter_by_question_terms(
         self,
@@ -3354,6 +3480,9 @@ class ImageGraphPreprocessor:
         # Initialize timing
         mark._last = t0
         W, H = image_pil.size
+        question_text = custom_question or self.cfg.question or ""
+        obj_terms, rel_terms = self._parse_question(question_text)
+        question_intent = self._last_question_intent
         # Record last processed size to let _get_optimal_batch_size adapt batch size
         self._last_processed_size = (W, H)
         
@@ -3374,6 +3503,8 @@ class ImageGraphPreprocessor:
         # filters (CLIP scoring, relation filtering, pruning, etc.). If the
         # user explicitly requests per-question preprocessing, bypass cache.
         detection_key = self._generate_detection_cache_key(image_pil)
+        if getattr(self.cfg, "targeted_open_vocabulary", True) and question_text:
+            detection_key = f"{detection_key}|question={question_intent.question}"
 
         # Compute which stages are needed (skip heavy steps when unused)
         need_graph = not self.cfg.skip_graph
@@ -3383,7 +3514,11 @@ class ImageGraphPreprocessor:
         need_rel = (need_graph or need_prompt or need_rel_draw)
         if not self.cfg.skip_relations_when_unused:
             need_rel = True
-        need_depth = need_rel if self.cfg.skip_depth_when_unused else True
+        need_depth = (
+            need_rel and question_intent.needs_depth
+            if self.cfg.skip_depth_when_unused
+            else True
+        )
         need_seg_draw = need_viz and self.cfg.show_segmentation and not self.cfg.export_preproc_only
         need_seg_for_rel = need_rel
         need_seg = (need_seg_draw or need_seg_for_rel) if self.cfg.skip_segmentation_when_unused else True
@@ -3396,7 +3531,7 @@ class ImageGraphPreprocessor:
         if cached is None:
             self.logger.info(f"   Running detectors...")
             mark("start_detection")
-            det_raw = self._run_detectors(image_pil)
+            det_raw = self._run_detectors(image_pil, question_intent=question_intent)
             # DetectorManager now performs fusion centrally; consume its outputs
             boxes_fused = det_raw.get("boxes", [d["box"] for d in det_raw.get("detections", [])])
             labels_fused = det_raw.get("labels", [d.get("label", "") for d in det_raw.get("detections", [])])
@@ -3443,7 +3578,6 @@ class ImageGraphPreprocessor:
 
         # 2) QUESTION FILTER (objects)
         self.logger.info(f"\n🔎 [2/7] Question-Based Filtering")
-        obj_terms, rel_terms = self._parse_question(custom_question or self.cfg.question)
         question_obj_indices: Set[int] = set()
         mentioned_object_types: Set[str] = set()
 
@@ -3456,18 +3590,26 @@ class ImageGraphPreprocessor:
         # This enables keeping only target object + directly connected objects
         target_object_detected = None
         self._singleton_mode_enabled = False
+        anchor_terms = set(getattr(question_intent, "anchor_terms", ()))
+        relation_anchor_terms = set(
+            getattr(question_intent, "relation_anchor_terms", ())
+        )
+        relation_subject_terms = relation_anchor_terms or anchor_terms
+        for label in labels:
+            canonical = canonical_label(label).lower()
+            base = base_label(label).lower()
+            if canonical in relation_subject_terms or base in relation_subject_terms:
+                mentioned_object_types.add(canonical)
         
         # ALWAYS log to debug - use print() to bypass logger
-        print(f"\n[DEBUG SINGLETON CHECK]")
-        print(f"  Question: '{custom_question or self.cfg.question}'")
-        print(f"  obj_terms: {obj_terms}")
-        print(f"  apply_question_filter: {self.cfg.apply_question_filter}")
-        print(f"  len(labels): {len(labels)}")
-        
-        if obj_terms and self.cfg.apply_question_filter:
+        if (
+            getattr(self.cfg, "singleton_filtering_enabled", False)
+            and obj_terms
+            and self.cfg.apply_question_filter
+        ):
             # Find which object types in detections match the question terms
             # More precise matching: term must match the base object type
-            for term in obj_terms:
+            for term in anchor_terms:
                 term_lower = term.lower().strip()
                 for label in labels:
                     canonical = canonical_label(label).lower()
@@ -3477,13 +3619,6 @@ class ImageGraphPreprocessor:
                     if term_lower == canonical or term_lower == base or term_lower in base.split('_'):
                         mentioned_object_types.add(canonical)
                         break
-            
-            # ALWAYS log singleton detection - use print() to bypass logger
-            print(f"\n[SINGLETON DETECTION]")
-            print(f"  Question: '{custom_question or self.cfg.question}'")
-            print(f"  Question terms extracted: {obj_terms}")
-            print(f"  Available labels: {labels[:10]}")
-            print(f"  Matched object types: {mentioned_object_types}")
             
             # SINGLETON MODE: Exactly ONE object type mentioned
             if len(mentioned_object_types) == 1:
@@ -3501,11 +3636,11 @@ class ImageGraphPreprocessor:
                     self._singleton_mode_enabled = True
                     self._singleton_target_label = target_obj_label
                     
-                    print(f"\n[SINGLETON MODE ACTIVATED]")
-                    print(f"   Target object: '{target_obj_label}'")
-                    print(f"   Found {len(target_indices)} instance(s) at indices {target_indices}")
-                    print(f"   Will filter to: target + connected objects only")
-                    
+                    self.logger.info(
+                        "[SINGLETON MODE] target=%s instances=%s",
+                        target_obj_label,
+                        target_indices,
+                    )
                     target_object_detected = {
                         'label': target_obj_label,
                         'indices': target_indices
@@ -3538,8 +3673,70 @@ class ImageGraphPreprocessor:
         # 3) LABEL-WISE NMS BEFORE SEGMENTATION (major speed-up)
         # In singleton mode, protect target objects from being removed by NMS
         protected_indices = self._target_object_indices if hasattr(self, '_target_object_indices') else None
-        boxes, labels, scores, keep = self._apply_label_nms(boxes, labels, scores, protected_indices)
+        if self.cfg.apply_label_nms:
+            boxes, labels, scores, keep = self._apply_label_nms(
+                boxes, labels, scores, protected_indices
+            )
+        else:
+            keep = list(range(len(boxes)))
         det2_for_mask = [det2_for_mask[i] for i in keep]
+
+        if (
+            getattr(self.cfg, "quality_question_pruning", True)
+            and self.cfg.apply_question_filter
+            and question_intent.object_terms
+            and not (
+                question_intent.relation_terms
+                and not question_intent.relation_anchor_terms
+            )
+        ):
+            relevant_terms = {
+                str(term).replace("_", " ").lower()
+                for term in question_intent.object_terms
+            }
+            candidates_by_label: Dict[str, List[int]] = {}
+            relevant_indices = []
+            for index, label in enumerate(labels):
+                canonical = canonical_label(label).replace("_", " ").lower()
+                base = base_label(label).replace("_", " ").lower()
+                if canonical not in relevant_terms and base not in relevant_terms:
+                    continue
+                label_key = canonical_label(label).lower()
+                candidates_by_label.setdefault(label_key, []).append(index)
+
+            image_area = max(1.0, float(W * H))
+            image_diag = max(1.0, float(np.hypot(W, H)))
+            for label_key, candidates in candidates_by_label.items():
+                limit = (
+                    self.cfg.max_detections_per_label
+                    if question_intent.question_type == "count" and label_key == "person"
+                    else 2
+                )
+                def salience(index: int) -> float:
+                    x1, y1, x2, y2 = boxes[index][:4]
+                    area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / image_area
+                    cx = (x1 + x2) / 2.0
+                    cy = (y1 + y2) / 2.0
+                    center_distance = np.hypot(cx - W / 2.0, cy - H / 2.0) / image_diag
+                    return (
+                        float(scores[index])
+                        + 1.5 * float(np.sqrt(area_ratio))
+                        + 0.25 * (1.0 - float(center_distance))
+                    )
+
+                relevant_indices.extend(
+                    sorted(candidates, key=salience, reverse=True)[:limit]
+                )
+            if relevant_indices:
+                relevant_indices.sort()
+                boxes = [boxes[i] for i in relevant_indices]
+                labels = [labels[i] for i in relevant_indices]
+                scores = [scores[i] for i in relevant_indices]
+                det2_for_mask = [det2_for_mask[i] for i in relevant_indices]
+                self.logger.info(
+                    "   Quality question pruning kept %d relevant objects",
+                    len(relevant_indices),
+                )
         
         # CRITICAL: Update target_object_indices after NMS (indices change!)
         if hasattr(self, '_target_object_indices') and self._target_object_indices:
@@ -3593,12 +3790,61 @@ class ImageGraphPreprocessor:
                     preserved_targets.append(
                         (boxes[i], labels[i], scores[i], det2_for_mask[i] if det2_for_mask else None)
                     )
-        boxes, labels, scores = self._limit_detections_advanced(
-            boxes, labels, scores, 
-            question_terms=obj_terms,
-            clip_scores=clip_semantic_scores,
-            image_size=image_pil.size,
-        )
+        original_object_cap = self.cfg.max_objects_per_question
+        original_per_label_cap = self.cfg.max_detections_per_label
+        if question_intent.question_type == "count":
+            self.cfg.max_objects_per_question = max(
+                original_object_cap,
+                self.cfg.max_detections_per_label,
+            )
+        elif (
+            question_intent.relation_terms
+            and not question_intent.relation_anchor_terms
+        ):
+            # The answer is an unknown relation target. Preserve class diversity
+            # so repeated source instances cannot evict every possible target.
+            self.cfg.max_detections_per_label = min(original_per_label_cap, 3)
+            source_terms = {
+                str(term).replace("_", " ").lower()
+                for term in question_intent.relation_source_terms
+            }
+            source_candidates = [
+                i for i, label in enumerate(labels)
+                if canonical_label(label).replace("_", " ").lower() in source_terms
+                or base_label(label).replace("_", " ").lower() in source_terms
+            ]
+            if source_candidates:
+                image_area = max(1.0, float(W * H))
+                image_diag = max(1.0, float(np.hypot(W, H)))
+
+                def source_salience(index: int) -> float:
+                    x1, y1, x2, y2 = boxes[index][:4]
+                    area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / image_area
+                    center_distance = np.hypot(
+                        (x1 + x2) / 2.0 - W / 2.0,
+                        (y1 + y2) / 2.0 - H / 2.0,
+                    ) / image_diag
+                    return (
+                        float(scores[index])
+                        + 1.5 * float(np.sqrt(area_ratio))
+                        + 0.25 * (1.0 - float(center_distance))
+                    )
+
+                salient_source = max(source_candidates, key=source_salience)
+                clip_semantic_scores = dict(clip_semantic_scores)
+                clip_semantic_scores[salient_source] = 1.0
+        try:
+            boxes, labels, scores, kept_pruning_indices = self._limit_detections_advanced(
+                boxes, labels, scores,
+                question_terms=obj_terms,
+                clip_scores=clip_semantic_scores,
+                image_size=image_pil.size,
+                return_indices=True,
+            )
+        finally:
+            self.cfg.max_objects_per_question = original_object_cap
+            self.cfg.max_detections_per_label = original_per_label_cap
+        det2_for_mask = [det2_for_mask[i] for i in kept_pruning_indices]
         self.logger.info(f"   {initial_count} -> {len(boxes)} objects (removed {initial_count - len(boxes)} duplicates/low-score)")
         if preserved_targets:
             existing = {(canonical_label(lb).lower(), tuple(map(float, bx))) for bx, lb in zip(boxes, labels)}
@@ -3614,11 +3860,8 @@ class ImageGraphPreprocessor:
             self.logger.info(
                 f"   Restored {len(preserved_targets)} target objects after pruning"
             )
-        # Sync det2_for_mask with possibly reduced boxes
         if len(det2_for_mask) != len(boxes):
-            # Approximate alignment by score order
-            idx_sorted = sorted(range(len(scores)), key=lambda i: -float(scores[i]))
-            det2_for_mask = [det2_for_mask[i] for i in idx_sorted[: len(boxes)]] if det2_for_mask else [None] * len(boxes)
+            raise RuntimeError("Detection-to-mask identity was lost during pruning")
         # CRITICAL: Recompute singleton target indices after pruning
         if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
             target_label = str(self._singleton_target_label).lower()
@@ -3663,10 +3906,11 @@ class ImageGraphPreprocessor:
                     masks[i]["segmentation"] = self._fuse_with_det2_mask(masks[i]["segmentation"], d2m)
             self.logger.info(f"   Generated {len(masks)} segmentation masks")
             
-            # MASK QUALITY FILTER: Remove poor quality or fragmented segmentations
-            boxes, labels, scores, masks, det2_for_mask = self._filter_low_quality_masks(
-                boxes, labels, scores, masks, det2_for_mask
-            )
+            # MASK QUALITY FILTER (opt-in): Remove poor quality or fragmented segmentations
+            if getattr(self.cfg, "enable_mask_quality_filter", False):
+                boxes, labels, scores, masks, det2_for_mask = self._filter_low_quality_masks(
+                    boxes, labels, scores, masks, det2_for_mask
+                )
             # Post-segmentation deduplication: remove highly overlapping objects
             print(f"\n[4.5/7] Post-Segmentation Deduplication")
             print(f"   Checking for overlapping objects...")
@@ -3675,15 +3919,24 @@ class ImageGraphPreprocessor:
             # Pass target_indices to protect singleton targets from removal
             current_target_indices = getattr(self, '_target_object_indices', None)
             
-            boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
-                boxes, labels, scores, masks, depths=None,
-                iou_threshold=getattr(self.cfg, 'same_class_iou_threshold', 0.30),  # Same-class overlap threshold
-                mask_iou_threshold=0.60,  # Cross-class mask overlap threshold (lowered from 0.65)
-                cross_class_score_diff_threshold=getattr(self.cfg, 'cross_class_score_diff_threshold', 0.80),
-                target_indices=current_target_indices  # Protect targets in singleton mode
-            )
+            if self.cfg.post_segmentation_dedup:
+                boxes, labels, scores, masks, depths_temp, kept_overlap = self._remove_overlapping_objects(
+                    boxes, labels, scores, masks, depths=None,
+                    iou_threshold=getattr(self.cfg, 'same_class_iou_threshold', 0.30),  # Same-class overlap threshold
+                    mask_iou_threshold=0.60,  # Cross-class mask overlap threshold
+                    same_class_mask_iou_threshold=getattr(self.cfg, 'same_class_mask_iou_threshold', 0.80),
+                    containment_threshold=getattr(self.cfg, 'containment_threshold', 0.90),
+                    enable_containment_removal=bool(getattr(self.cfg, 'enable_containment_removal', True)),
+                    cross_class_score_diff_threshold=getattr(self.cfg, 'cross_class_score_diff_threshold', 0.80),
+                    target_indices=current_target_indices,  # Protect targets in singleton mode
+                    cross_class=bool(getattr(self.cfg, 'cross_class_suppression', False)),
+                )
+            else:
+                kept_overlap = list(range(len(boxes)))
             if len(boxes) < initial_count:
                 print(f"   Removed {initial_count - len(boxes)} overlapping objects")
+            else:
+                print("   No overlapping objects found")
             # CRITICAL: Update singleton target indices after post-segmentation deduplication
             # kept_overlap contains the original indices (w.r.t. boxes before dedup) that were kept.
             if hasattr(self, '_target_object_indices') and getattr(self, '_target_object_indices', None):
@@ -3707,8 +3960,6 @@ class ImageGraphPreprocessor:
                                 new_target_indices.add(idx)
 
                 self._target_object_indices = new_target_indices
-            else:
-                print(f"   No overlapping objects found")
         else:
             self.logger.info(f"\n[4/7] Segmentation (SAM)")
             self.logger.info(f"   Skipped (not needed for current config)")
@@ -3744,6 +3995,7 @@ class ImageGraphPreprocessor:
         if need_rel and boxes:
             self.logger.info(f"\n[6/7] Spatial Relations Inference")
             self.logger.info(f"   Analyzing relationships between {len(boxes)} objects...")
+            paper_algorithm = self.cfg.relation_selection_policy == "paper_algorithm"
             # Prepare relations config with image-level geometry params
             r_cfg = RelationsConfig(
                 margin_px=self.cfg.margin,
@@ -3762,7 +4014,11 @@ class ImageGraphPreprocessor:
             # (combined detection score + optional CLIP semantic score). This drastically
             # reduces pairwise combinations for geometry/CLIP checks while keeping
             # the most probable objects for the question.
-            max_rel_objects = min(int(self.cfg.max_objects_per_question or 50), 30)
+            max_rel_objects = (
+                len(boxes)
+                if paper_algorithm
+                else min(int(self.cfg.max_objects_per_question or 50), 30)
+            )
             local_rel_pairs = getattr(self.cfg, "relations_max_clip_pairs", 1000)
             local_per_src_pairs = getattr(self.cfg, "relations_per_src_clip_pairs", 50)
             indices_for_rel = list(range(len(boxes)))
@@ -3806,20 +4062,50 @@ class ImageGraphPreprocessor:
             )
 
             # Temporarily update inferencer config for this call
-            self.relations_inferencer.relations_config = r_cfg
+            # (the inferencer reads it from the `config` attribute)
+            self.relations_inferencer.config = r_cfg
 
-            rels_rel = self.relations_inferencer.infer(
-                image_pil=image_pil,
-                boxes=boxes_rel,
-                labels=labels_rel,
-                masks=masks_rel,
-                depths=depths_rel,
-                depth_map=depth_map,
-                use_geometry=True,
-                use_clip=True,
-                clip_threshold=getattr(self.cfg, "clip_pruning_threshold", 0.23),
-                question_rel_terms=rel_terms if rel_terms else None,
-            )
+            if paper_algorithm:
+                from gom.relations.paper import PaperRelationConfig, infer_paper_relations
+
+                paper_relation_config = PaperRelationConfig(
+                    direction_margin=float(self.cfg.paper_direction_margin),
+                    depth_threshold=float(self.cfg.paper_depth_threshold),
+                    near_threshold=float(self.cfg.paper_near_threshold),
+                    touching_iou_threshold=float(
+                        self.cfg.paper_touching_iou_threshold
+                    ),
+                    touching_gap_threshold=float(
+                        self.cfg.paper_touching_gap_threshold
+                    ),
+                    very_close_threshold=float(self.cfg.paper_very_close_threshold),
+                    close_threshold=float(self.cfg.paper_close_threshold),
+                    query_object_threshold=float(self.cfg.threshold_object_similarity),
+                    query_relation_threshold=float(
+                        self.cfg.threshold_relation_similarity
+                    ),
+                    top_k_per_head=int(self.cfg.max_relations_per_object),
+                )
+                rels_rel = infer_paper_relations(
+                    boxes_rel,
+                    labels=labels_rel,
+                    depths=depths_rel,
+                    image_size=image_pil.size,
+                    config=paper_relation_config,
+                )
+            else:
+                rels_rel = self.relations_inferencer.infer(
+                    image_pil=image_pil,
+                    boxes=boxes_rel,
+                    labels=labels_rel,
+                    masks=masks_rel,
+                    depths=depths_rel,
+                    depth_map=depth_map,
+                    use_geometry=True,
+                    use_clip=bool(r_cfg.use_clip_relations),
+                    clip_threshold=float(r_cfg.clip_threshold),
+                    question_rel_terms=rel_terms if rel_terms else None,
+                )
             mark("relations_infer")
             
             self.logger.info(f"   Found {len(rels_rel)} candidate relationships")
@@ -3851,6 +4137,61 @@ class ImageGraphPreprocessor:
             rels_all = self._clean_invalid_relations(rels_all, len(boxes))
             if initial_rels != len(rels_all):
                 self.logger.info(f"   Cleaned {initial_rels - len(rels_all)} invalid relations")
+
+        paper_algorithm = self.cfg.relation_selection_policy == "paper_algorithm"
+        if paper_algorithm and boxes:
+            from gom.relations.paper import (
+                FastTextSimilarity,
+                PaperRelationConfig,
+                filter_paper_graph,
+            )
+
+            fasttext = FastTextSimilarity(self.cfg.paper_fasttext_path)
+            if (
+                question_text
+                and self.cfg.paper_require_fasttext
+                and not fasttext.available
+            ):
+                raise RuntimeError(
+                    "paper_aaai26 requires paper_fasttext_path pointing to a converted "
+                    "cc.en.300 KeyedVectors file"
+                )
+            kept_indices, rels_all = filter_paper_graph(
+                labels,
+                rels_all,
+                question=question_text,
+                config=PaperRelationConfig(
+                    direction_margin=float(self.cfg.paper_direction_margin),
+                    depth_threshold=float(self.cfg.paper_depth_threshold),
+                    near_threshold=float(self.cfg.paper_near_threshold),
+                    touching_iou_threshold=float(
+                        self.cfg.paper_touching_iou_threshold
+                    ),
+                    touching_gap_threshold=float(
+                        self.cfg.paper_touching_gap_threshold
+                    ),
+                    very_close_threshold=float(self.cfg.paper_very_close_threshold),
+                    close_threshold=float(self.cfg.paper_close_threshold),
+                    query_object_threshold=float(self.cfg.threshold_object_similarity),
+                    query_relation_threshold=float(
+                        self.cfg.threshold_relation_similarity
+                    ),
+                    top_k_per_head=int(self.cfg.max_relations_per_object),
+                ),
+                semantic_similarity=fasttext if fasttext.available else None,
+            )
+            boxes = [boxes[index] for index in kept_indices]
+            labels = [labels[index] for index in kept_indices]
+            scores = [scores[index] for index in kept_indices]
+            if masks is not None:
+                masks = [masks[index] for index in kept_indices]
+            if depths is not None:
+                depths = [depths[index] for index in kept_indices]
+            self.logger.info(
+                "   Paper Algorithm 3 kept %d objects and %d relations",
+                len(boxes),
+                len(rels_all),
+            )
         
         # SINGLETON FALLBACK Logic
         # If question mentions only ONE object type, keep:
@@ -3860,12 +4201,76 @@ class ImageGraphPreprocessor:
         
         # 6a) Relation filtering by question terms (optional).
         rels_all_before_question_filter = rels_all[:] if rels_all else None
-        if self.cfg.filter_relations_by_question and rel_terms:
-            # Recompute question object indices after pruning/NMS/dedup (indices may shift).
-            question_obj_indices = {
-                i for i, label in enumerate(labels)
-                if canonical_label(label).lower() in mentioned_object_types
+        question_obj_indices: Set[int] = set()
+        relation_candidate_indices: Set[int] = set()
+        if rel_terms:
+            for anchor in relation_anchor_terms:
+                candidates = [
+                    i
+                    for i, label in enumerate(labels)
+                    if canonical_label(label).lower() == anchor
+                    or base_label(label).lower() == anchor
+                ]
+                if candidates:
+                    question_obj_indices.add(
+                        max(candidates, key=lambda i: float(scores[i]))
+                    )
+            relation_candidate_indices = {
+                i
+                for i, label in enumerate(labels)
+                if canonical_label(label).lower()
+                in set(question_intent.relation_source_terms)
+                or base_label(label).lower()
+                in set(question_intent.relation_source_terms)
             }
+
+        if (
+            self.cfg.relation_selection_policy == "question_only"
+            and self.cfg.filter_relations_by_question
+            and rel_terms
+        ):
+            # Recompute question object indices after pruning/NMS/dedup (indices may shift).
+            question_obj_indices = set()
+            for anchor in relation_anchor_terms:
+                candidates = [
+                    i for i, label in enumerate(labels)
+                    if canonical_label(label).lower() == anchor
+                    or base_label(label).lower() == anchor
+                ]
+                if candidates:
+                    question_obj_indices.add(
+                        max(candidates, key=lambda i: float(scores[i]))
+                    )
+            relation_candidate_indices = {
+                i for i, label in enumerate(labels)
+                if canonical_label(label).lower()
+                in set(question_intent.relation_source_terms)
+                or base_label(label).lower()
+                in set(question_intent.relation_source_terms)
+            }
+            if (
+                relation_candidate_indices
+                and re.search(r"\b(he|him|his|she|her|hers)\b", question_text.lower())
+            ):
+                image_area = max(1.0, float(W * H))
+                image_diag = max(1.0, float(np.hypot(W, H)))
+
+                def source_salience(index: int) -> float:
+                    x1, y1, x2, y2 = boxes[index][:4]
+                    area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / image_area
+                    center_distance = np.hypot(
+                        (x1 + x2) / 2.0 - W / 2.0,
+                        (y1 + y2) / 2.0 - H / 2.0,
+                    ) / image_diag
+                    return (
+                        float(scores[index])
+                        + 1.5 * float(np.sqrt(area_ratio))
+                        + 0.25 * (1.0 - float(center_distance))
+                    )
+
+                relation_candidate_indices = {
+                    max(relation_candidate_indices, key=source_salience)
+                }
             rels_all = self.relations_inferencer.filter_by_question(
                 rels_all,
                 question_terms=rel_terms,
@@ -3881,6 +4286,7 @@ class ImageGraphPreprocessor:
                 question_subject_idxs=(
                     getattr(self, "_target_object_indices", None) or question_obj_indices or None
                 ),
+                question_candidate_idxs=relation_candidate_indices or None,
                 masks=masks,
                 depths=depths,
                 depth_map=depth_map,
@@ -3899,12 +4305,27 @@ class ImageGraphPreprocessor:
                         self.logger.info(
                             "[SINGLETON MODE] Relaxed question relation filter to keep more target relations"
                         )
+            if getattr(self.cfg, "render_question_relations_only", True):
+                requested = {str(term).strip().lower() for term in rel_terms}
+                rels_all = [
+                    relation for relation in rels_all
+                    if str(relation.get("relation", "")).strip().lower() in requested
+                    and (
+                        not relation_candidate_indices
+                        or relation.get("src_idx") in relation_candidate_indices
+                    )
+                    and (
+                        not question_obj_indices
+                        or relation.get("tgt_idx") in question_obj_indices
+                    )
+                ]
         # 6a.1) Drop too-close/too-far relations unless justified or requested
-        rels_all = self.relations_inferencer.filter_relations_by_proximity(
-            rels_all,
-            boxes,
-            question_rel_terms=rel_terms if rel_terms else None,
-        )
+        if not paper_algorithm:
+            rels_all = self.relations_inferencer.filter_relations_by_proximity(
+                rels_all,
+                boxes,
+                question_rel_terms=rel_terms if rel_terms else None,
+            )
         # CRITICAL: Recompute singleton target indices after relations filtering
         if self._singleton_mode_enabled and getattr(self, "_singleton_target_label", None):
             target_label = str(self._singleton_target_label).lower()
@@ -3915,25 +4336,44 @@ class ImageGraphPreprocessor:
             if new_target_indices:
                 self._target_object_indices = new_target_indices
         # 6b) Per-object limits and inverse-duplicate removal.
-        rels_all = self.relations_inferencer.limit_relationships_per_object(
-            rels_all,
-            boxes,
-            max_relations_per_object=self.cfg.max_relations_per_object,
-            min_relations_per_object=self.cfg.min_relations_per_object,
-            question_rel_terms=rel_terms if rel_terms else None,
-            question_subject_idxs=(
-                getattr(self, "_target_object_indices", None) or question_obj_indices or None
-            ),
-            masks=masks,
-            depths=depths,
-            depth_map=depth_map,
-        )
-        rels_all = self.relations_inferencer.drop_inverse_duplicates(
-            rels_all,
-            question_rel_terms=rel_terms if rel_terms else None,
-            max_relations_per_object=self.cfg.max_relations_per_object,
-            total_objects=len(boxes),
-        )
+        if not paper_algorithm:
+            rels_all = self.relations_inferencer.limit_relationships_per_object(
+                rels_all,
+                boxes,
+                max_relations_per_object=self.cfg.max_relations_per_object,
+                min_relations_per_object=(
+                    0
+                    if self.cfg.relation_selection_policy == "paper_ranked"
+                    else self.cfg.min_relations_per_object
+                ),
+                question_rel_terms=rel_terms if rel_terms else None,
+                question_subject_idxs=(
+                    getattr(self, "_target_object_indices", None)
+                    or question_obj_indices
+                    or None
+                ),
+                masks=masks,
+                depths=depths,
+                depth_map=depth_map,
+            )
+            rels_all = self.relations_inferencer.drop_inverse_duplicates(
+                rels_all,
+                question_rel_terms=rel_terms if rel_terms else None,
+                max_relations_per_object=self.cfg.max_relations_per_object,
+                total_objects=len(boxes),
+            )
+        if self.cfg.relation_selection_policy == "paper_ranked":
+            rels_all = rank_paper_relations(
+                rels_all,
+                question_rel_terms=rel_terms if rel_terms else None,
+                question_subject_idxs=(
+                    getattr(self, "_target_object_indices", None)
+                    or question_obj_indices
+                    or None
+                ),
+                question_candidate_idxs=relation_candidate_indices or None,
+                max_total=self.cfg.paper_ranked_max_relations,
+            )
 
         # 6c) Apply singleton filtering AFTER limiting relations per object
         # This ensures we only consider the most important relations when finding connected objects
@@ -3991,68 +4431,44 @@ class ImageGraphPreprocessor:
             labels = self._add_unique_suffixes(labels)
             
             scene_graph = build_scene_graph(
-                image_size=(W, H),
+                image=image_pil,
                 boxes=boxes,
                 labels=labels,
                 scores=scores,
                 depths=depths,
             )
-            
-            # Add inferred relation labels to graph edges
-            # This ensures that the triple output matches what's drawn in the visualization
-            # CREATE edges explicitly for ALL inferred relations (don't rely on geometric edge creation)
+
+            # The relation engine is authoritative. Remove every builder-created
+            # object edge before adding the exact filtered edge set.
+            for u, v in list(scene_graph.edges()):
+                if (
+                    scene_graph.nodes[u].get("label") != "scene"
+                    and scene_graph.nodes[v].get("label") != "scene"
+                ):
+                    scene_graph.remove_edge(u, v)
+
             for rel in rels_all:
                 src_idx = int(rel["src_idx"])
                 tgt_idx = int(rel["tgt_idx"])
-                relation_name = str(rel.get("relation", ""))
-                
-                # Add/update edge with relation name
-                if scene_graph.has_edge(src_idx, tgt_idx):
-                    scene_graph.edges[src_idx, tgt_idx]["relation"] = relation_name
-                else:
-                    # Create edge if it doesn't exist yet
-                    scene_graph.add_edge(src_idx, tgt_idx, relation=relation_name)
+                edge_data = {
+                    key: value
+                    for key, value in rel.items()
+                    if key not in {"src_idx", "tgt_idx"}
+                }
+                if paper_algorithm:
+                    from gom.relations.paper import validate_paper_relation
 
-                # Normalize spatial relations to match geometric attributes when possible.
-                # Some relation sources may have used a different sign convention; prefer
-                # a geometry-based inference for pure spatial predicates so visualization
-                # matches the triples text.
-                try:
-                    from gom.graph.prompt import _infer_relation_from_attrs
+                    validate_paper_relation(edge_data)
+                scene_graph.add_edge(src_idx, tgt_idx, **edge_data)
 
-                    # Only apply normalization to basic spatial predicates
-                    spatial_set = {
-                        "left_of",
-                        "right_of",
-                        "above",
-                        "below",
-                        "on_top_of",
-                        "under",
-                        "in_front_of",
-                        "behind",
-                    }
-                    if relation_name in spatial_set:
-                        edge_data = scene_graph.edges[src_idx, tgt_idx]
-                        inferred = _infer_relation_from_attrs(edge_data)
-                        if inferred in spatial_set and inferred != relation_name:
-                            scene_graph.edges[src_idx, tgt_idx]["relation"] = inferred
-                except Exception:
-                    # If anything goes wrong here, don't break the pipeline; keep original relation
-                    pass
-            
-            # FIX: Ensure ALL edges (even those without explicit relations) have a "relation" field
-            # This prevents inconsistency between triples.txt (which infers relations) and JSON output
-            from gom.graph.prompt import _infer_relation_from_attrs
-            for u, v in list(scene_graph.edges()):
-                # Skip scene node edges
-                if scene_graph.nodes[u].get("label") == "scene" or scene_graph.nodes[v].get("label") == "scene":
-                    continue
-                
-                # If edge doesn't have a relation, infer it from geometric attributes
-                edge_data = scene_graph.edges[u, v]
-                if "relation" not in edge_data or not edge_data["relation"]:
-                    inferred_rel = _infer_relation_from_attrs(edge_data)
-                    scene_graph.edges[u, v]["relation"] = inferred_rel
+            from gom.relations.paper import relation_digest
+
+            edge_digest = relation_digest(rels_all)
+            scene_graph.graph["edge_digest"] = edge_digest
+            scene_graph.graph["edge_count"] = len(rels_all)
+            scene_graph.graph["relation_selection_policy"] = (
+                self.cfg.relation_selection_policy
+            )
         else:
             scene_graph = None
 
@@ -4084,6 +4500,16 @@ class ImageGraphPreprocessor:
                         "src_idx": u,
                         "tgt_idx": v,
                         "relation": relation,
+                        **(
+                            {"modifier": edge_data["modifier"]}
+                            if edge_data.get("modifier")
+                            else {}
+                        ),
+                        **(
+                            {"display_relation": edge_data["display_relation"]}
+                            if edge_data.get("display_relation")
+                            else {}
+                        ),
                     })
         elif need_rel:
             # Fallback to original rels_all if no scene_graph
@@ -4112,19 +4538,34 @@ class ImageGraphPreprocessor:
             if not draw_bg:
                 self.logger.info(f"   Background: transparent")
             
-            out_img = os.path.join(self.cfg.output_folder, f"{image_name}_output.{ext}")
-            self.visualizer.draw(
-                image=image_pil,
-                boxes=boxes,
-                labels=self._format_labels_for_display(labels),
-                scores=scores,
-                relationships=rels_for_viz,
-                masks=masks,
-                save_path=out_img,
-                draw_background=draw_bg,
-                bg_color=(1, 1, 1, 0),
-            )
-            self.logger.info(f"   Saved: {out_img}")
+            if self.cfg.render_variants:
+                self._render_style_variants(
+                    image=image_pil,
+                    image_name=image_name,
+                    boxes=boxes,
+                    labels=labels,
+                    scores=scores,
+                    relationships=rels_for_viz,
+                    masks=masks,
+                    extension=ext,
+                    draw_background=draw_bg,
+                )
+            else:
+                out_img = os.path.join(
+                    self.cfg.output_folder, f"{image_name}_output.{ext}"
+                )
+                self.visualizer.draw(
+                    image=image_pil,
+                    boxes=boxes,
+                    labels=self._format_labels_for_display(labels),
+                    scores=scores,
+                    relationships=rels_for_viz,
+                    masks=masks,
+                    save_path=out_img,
+                    draw_background=draw_bg,
+                    bg_color=(1, 1, 1, 0),
+                )
+                self.logger.info(f"   Saved: {out_img}")
         else:
             self.logger.info(f"   Skipped (visualization disabled)")
             
@@ -4160,6 +4601,77 @@ class ImageGraphPreprocessor:
             self.logger.info(f"   • Segmentation masks: {len(masks)}")
         self.logger.info(f"{'='*70}")
         self.logger.info(f"")
+
+    def _render_style_variants(
+        self,
+        *,
+        image: Image.Image,
+        image_name: str,
+        boxes: Sequence[Sequence[float]],
+        labels: Sequence[str],
+        scores: Sequence[float],
+        relationships: Sequence[Dict[str, Any]],
+        masks: Optional[Sequence[Any]],
+        extension: str,
+        draw_background: bool,
+    ) -> None:
+        """Render controlled style variants from one in-memory pipeline result."""
+        allowed_fields = {item.name for item in fields(VisualizerConfig)}
+        allowed_fields.add("label_mode")
+        base = asdict(self.visualizer.cfg)
+        metadata: Dict[str, Any] = {}
+        from gom.relations.paper import relation_digest
+
+        edge_digest = relation_digest(relationships)
+        for name, overrides in self.cfg.render_variants.items():
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", str(name)):
+                raise ValueError(f"Invalid render variant name: {name!r}")
+            unknown = sorted(set(overrides) - allowed_fields)
+            if unknown:
+                raise ValueError(
+                    f"Render variant {name!r} has unsupported fields: {unknown}"
+                )
+            variant_config = dict(base)
+            variant_overrides = dict(overrides)
+            label_mode = str(variant_overrides.pop("label_mode", self.cfg.label_mode))
+            variant_config.update(variant_overrides)
+            visualizer = Visualizer(VisualizerConfig(**variant_config))
+            variant_dir = Path(self.cfg.output_folder) / "renders" / str(name)
+            variant_dir.mkdir(parents=True, exist_ok=True)
+            output_path = variant_dir / f"{image_name}_output.{extension}"
+            visualizer.draw(
+                image=image,
+                boxes=boxes,
+                labels=self._format_labels_for_mode(labels, label_mode),
+                scores=scores,
+                relationships=relationships,
+                masks=masks,
+                save_path=str(output_path),
+                draw_background=draw_background,
+                bg_color=(1, 1, 1, 0),
+            )
+            metadata[str(name)] = {
+                "output_path": output_path.as_posix(),
+                "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                "effective_style": visualizer.effective_style(image.size),
+                "label_mode": label_mode,
+                "display_relationships": visualizer.cfg.display_relationships,
+                "display_relation_labels": visualizer.cfg.display_relation_labels,
+                "edge_count": len(relationships),
+                "edge_digest": edge_digest,
+                "rendered_edge_count": (
+                    len(relationships) if visualizer.cfg.display_relationships else 0
+                ),
+            }
+            self.logger.info(f"   Saved variant {name}: {output_path}")
+
+        metadata_path = (
+            Path(self.cfg.output_folder) / f"{image_name}_render_variants.json"
+        )
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     def _get_connected_object_indices(
         self,
@@ -4273,9 +4785,9 @@ class ImageGraphPreprocessor:
             if ip is None:
                 continue
             img_counts[ip] = img_counts.get(ip, 0) + 1
-        multi_question_images = {p for p, c in img_counts.items() if c > 1}
         # Prepare per-image sequential counters for readable per-question names
         img_counters: Dict[str, int] = {p: 0 for p in img_counts}
+        base_detection_cache: Dict[str, Dict[str, Any]] = {}
         
         for batch_start in range(0, len(rows), batch_size):
             batch_rows = rows[batch_start:batch_start + batch_size]
@@ -4296,6 +4808,14 @@ class ImageGraphPreprocessor:
                     else:
                         img_counters[img_p] = 1
                     unique_name = f"{name}_q{img_counters[img_p]}"
+                    if self.cfg.resume_existing_outputs and self._outputs_complete(
+                        unique_name
+                    ):
+                        if getattr(self.cfg, "verbose", False):
+                            self.logger.info(
+                                f"[RESUME] Skipping complete output {unique_name}"
+                            )
+                        continue
                     batch_data.append({
                         "image": img,
                         "name": name,
@@ -4310,60 +4830,111 @@ class ImageGraphPreprocessor:
             if not batch_data:
                 continue
             
-            # Run batch detection for all images at once
-            batch_images = [item["image"] for item in batch_data]
-            batch_det_results = self._run_detectors_batch(batch_images)
+            # Run the question-independent detector ensemble once per unique
+            # image. Question-targeted OWLv2 candidates are added below.
+            batch_det_results: List[Optional[Dict[str, Any]]] = [None] * len(batch_data)
+            uncached_indices = []
+            uncached_images = []
+            for index, item in enumerate(batch_data):
+                cached_base = base_detection_cache.get(item["path"])
+                if cached_base is not None:
+                    batch_det_results[index] = copy.deepcopy(cached_base)
+                else:
+                    uncached_indices.append(index)
+                    uncached_images.append(item["image"])
+            if uncached_images:
+                uncached_results = self._run_detectors_batch(uncached_images)
+                for index, result in zip(uncached_indices, uncached_results):
+                    base_detection_cache[batch_data[index]["path"]] = copy.deepcopy(result)
+                    batch_det_results[index] = result
             
             # Process each image individually with cached detections
             for item, det_result in zip(batch_data, batch_det_results):
-                img = item["image"]
-                name = item["name"]
-                unique_name = item.get("unique_name", name)
-                question = item["question"]
-                
-                # Generate a detection-only cache key and store detection results
-                detection_key = self._generate_detection_cache_key(img)
-
-                # DetectorManager already fused batch detection results; use them
-                W, H = img.size
-                boxes_fused = det_result.get("boxes", [d["box"] for d in det_result.get("detections", [])])
-                labels_fused = det_result.get("labels", [d.get("label", "") for d in det_result.get("detections", [])])
-                scores_fused = det_result.get("scores", [d.get("score", 0.0) for d in det_result.get("detections", [])])
-                labels_fused = [canonical_label(l) for l in labels_fused]
-
-                # Store in cache under detection-only key
-                det_for_mask = [
-                    {
-                        "box": b,
-                        "label": l,
-                        "score": s,
-                        "from": "fused",
-                        "det2_mask": self._pick_best_det2_mask_for_box(b, det_result["detections"]),
-                    }
-                    for b, l, s in zip(boxes_fused, labels_fused, scores_fused)
-                ]
-
-                self._cache_put(detection_key, {
-                    "boxes": boxes_fused,
-                    "labels": labels_fused,
-                    "scores": scores_fused,
-                    "det2": det_for_mask,
-                })
-                
-                # Continue with normal processing (uses cached detection)
-                # If this image appears multiple times with different questions,
-                # force preprocessing per question to avoid reusing cached results.
-                original_force = getattr(self.cfg, "force_preprocess_per_question", False)
+                if det_result is None:
+                    continue
                 try:
-                    if item.get("path") in multi_question_images:
-                        self.cfg.force_preprocess_per_question = True
-                    # Pass a unique name so outputs are per-question instead of per-image
+                    img = item["image"]
+                    name = item["name"]
+                    unique_name = item.get("unique_name", name)
+                    question = item["question"]
+
+                    self._parse_question(question)
+                    question_intent = self._last_question_intent
+                    det_img, det_scale = self._detection_image_and_scale(img)
+                    detections = self._append_targeted_open_vocab(
+                        copy.deepcopy(det_result.get("detections", [])),
+                        det_img,
+                        det_scale,
+                        question_intent,
+                        dict(det_result.get("counts", {})),
+                    )
+                    boxes_fused = [d["box"] for d in detections]
+                    labels_fused = [d.get("label", "") for d in detections]
+                    scores_fused = [d.get("score", 0.0) for d in detections]
+                    labels_fused = [canonical_label(l) for l in labels_fused]
+
+                    det_for_mask = [
+                        {
+                            "box": b,
+                            "label": l,
+                            "score": s,
+                            "from": "fused",
+                            "det2_mask": self._pick_best_det2_mask_for_box(b, detections),
+                        }
+                        for b, l, s in zip(boxes_fused, labels_fused, scores_fused)
+                    ]
+
+                    detection_key = self._generate_detection_cache_key(img)
+                    if (
+                        getattr(self.cfg, "targeted_open_vocabulary", True)
+                        and question_intent.question
+                    ):
+                        detection_key = f"{detection_key}|question={question_intent.question}"
+                    self._cache_put(detection_key, {
+                        "boxes": boxes_fused,
+                        "labels": labels_fused,
+                        "scores": scores_fused,
+                        "det2": det_for_mask,
+                    })
+
+                    # Pass a unique name so all question-dependent stages and outputs
+                    # remain separate while detection is served from the keyed cache.
                     self.process_single_image(img, unique_name, custom_question=question)
-                finally:
-                    self.cfg.force_preprocess_per_question = original_force
+                except Exception as exc:
+                    # A single unprocessable image must not abort a multi-hour batch.
+                    # --resume retries it next run because its outputs stay absent.
+                    self.logger.error(f"[ERROR] Processing {item['path']}: {exc}")
+                    self._free_memory()
             
             # Free memory after each batch
             self._free_memory()
+
+    def _outputs_complete(self, image_name: str) -> bool:
+        """Return True only when every configured output for a row exists."""
+        output = Path(self.cfg.output_folder)
+        required: List[Path] = []
+        if not self.cfg.skip_graph:
+            required.append(output / f"{image_name}_graph.json")
+        if not self.cfg.skip_prompt:
+            required.append(output / f"{image_name}_graph_triples.txt")
+        if not self.cfg.skip_visualization:
+            extension = (
+                self.cfg.output_format
+                if self.cfg.output_format in {"jpg", "png", "svg"}
+                else "jpg"
+            )
+            if self.cfg.render_variants:
+                required.append(output / f"{image_name}_render_variants.json")
+                required.extend(
+                    output
+                    / "renders"
+                    / str(variant)
+                    / f"{image_name}_output.{extension}"
+                    for variant in self.cfg.render_variants
+                )
+            else:
+                required.append(output / f"{image_name}_output.{extension}")
+        return bool(required) and all(path.is_file() for path in required)
 
     def _run_from_dataset(self) -> None:
         """Load a Hugging Face dataset split and process images in sequence."""
@@ -4479,16 +5050,19 @@ class ImageGraphPreprocessor:
             - Numbering starts at 1 (not 0) for human readability
             - Falls back to original labels if mode unrecognized
         """
-        if self.cfg.label_mode == "original":
-            return [f"{lb}" for lb in labels]
-        if self.cfg.label_mode == "numeric":
-            return [str(i + 1) for i, _ in enumerate(labels)]
-        if self.cfg.label_mode == "alphabetic":
-            import string as _string
-            return list(_string.ascii_uppercase[: len(labels)])
-        return labels
+        return self._format_labels_for_mode(labels, self.cfg.label_mode)
 
     @staticmethod
+    def _format_labels_for_mode(labels: Sequence[str], label_mode: str) -> List[str]:
+        if label_mode == "original":
+            return [f"{lb}" for lb in labels]
+        if label_mode == "numeric":
+            return [str(i + 1) for i, _ in enumerate(labels)]
+        if label_mode == "alphabetic":
+            import string as _string
+            return list(_string.ascii_uppercase[: len(labels)])
+        return list(labels)
+
     @staticmethod
     def _save_graph(G, path_gpickle: str, path_json: str) -> None:
         """

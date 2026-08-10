@@ -18,9 +18,96 @@ import torch
 from huggingface_hub import login as hf_login
 
 from gom.vqa.io import load_examples
-from gom.vqa.models import VLLMWrapper, HFVLModel
 from gom.vqa.runner import run_vqa, evaluate
 from gom.vqa.preproc import run_preprocessing
+
+
+class VLLMWrapper:
+    """Minimal vLLM chat wrapper exposing generate(prompt, image_path) -> str."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        max_length: int = 512,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+        tensor_parallel_size: int = 1,
+    ) -> None:
+        from vllm import LLM, SamplingParams
+
+        self.llm = LLM(
+            model=model_name,
+            tensor_parallel_size=tensor_parallel_size,
+            trust_remote_code=True,
+        )
+        self.sampling = SamplingParams(
+            max_tokens=max_length, temperature=temperature, top_p=top_p
+        )
+
+    def generate(self, prompt: str, image_path: str | None = None) -> str:
+        content = []
+        if image_path:
+            url = f"file://{os.path.abspath(image_path)}"
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        content.append({"type": "text", "text": prompt})
+        messages = [{"role": "user", "content": content}]
+        out = self.llm.chat(messages=[messages], sampling_params=self.sampling)
+        return out[0].outputs[0].text.strip()
+
+
+class HFVLModel:
+    """Minimal HuggingFace image-text-to-text wrapper exposing generate(prompt, image_path) -> str."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        max_length: int = 512,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+    ) -> None:
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+
+        self.device = device if torch.cuda.is_available() else "cpu"
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        dtype = torch.bfloat16 if self.device != "cpu" else torch.float32
+        self.model = (
+            AutoModelForImageTextToText.from_pretrained(
+                model_name, torch_dtype=dtype, trust_remote_code=True
+            )
+            .to(self.device)
+            .eval()
+        )
+        self.max_length = max_length
+        self.temperature = temperature
+        self.top_p = top_p
+
+    @torch.inference_mode()
+    def generate(self, prompt: str, image_path: str | None = None) -> str:
+        from PIL import Image
+
+        content = []
+        if image_path:
+            content.append({"type": "image", "image": Image.open(image_path).convert("RGB")})
+        content.append({"type": "text", "text": prompt})
+        messages = [{"role": "user", "content": content}]
+        inputs = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self.model.device)
+        out = self.model.generate(
+            **inputs,
+            max_new_tokens=self.max_length,
+            do_sample=self.temperature > 0,
+            temperature=max(self.temperature, 1e-5),
+            top_p=self.top_p,
+        )
+        gen = out[:, inputs["input_ids"].shape[1]:]
+        return self.processor.batch_decode(gen, skip_special_tokens=True)[0].strip()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -403,7 +490,7 @@ def main() -> int:
     
     print(f"[INFO] Risultati VQA salvati in: {args.output_file}")
     if metrics:
-        print(f("[INFO] Metriche salvate in: {mfile}"))
+        print(f"[INFO] Metriche salvate in: {mfile}")
     
     return 0
 

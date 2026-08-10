@@ -244,6 +244,8 @@ class SceneGraphBuilder:
         boxes_xyxy: Sequence[Sequence[float]],
         labels: Sequence[str],
         scores: Sequence[float],
+        depths: Optional[Sequence[float]] = None,
+        caption: str = "",
     ) -> nx.DiGraph:
         """
         Build scene graph from object detections.
@@ -258,6 +260,10 @@ class SceneGraphBuilder:
                        [[x1, y1, x2, y2], ...] where (x1,y1) is top-left
             labels: List of object class labels (one per box)
             scores: List of detection confidence scores (one per box)
+            depths: Optional precomputed per-object depth values in [0, 1]
+                    (higher = closer). When given, they take precedence over
+                    the builder's own depth estimator.
+            caption: Optional scene caption stored on the 'scene' node.
         
         Returns:
             NetworkX DiGraph with:
@@ -311,9 +317,14 @@ class SceneGraphBuilder:
         clip_embs = self._compute_clip_embeddings(image, boxes_xyxy) if self.cfg.store_clip_embeddings else None
         dom_colors = self._dominant_colors(image, boxes_xyxy) if self.cfg.store_color else ["unknown"] * N
 
-        # Depth: sampled at box centroids
+        # Depth: precomputed values win; otherwise sample at box centroids
         centres = [center(b) for b in boxes_xyxy]
-        depths = self._relative_depth(image, centres) if self.cfg.store_depth else [0.5] * N
+        if depths is not None and len(depths) == N:
+            depths = [float(d) for d in depths]
+        elif self.cfg.store_depth:
+            depths = self._relative_depth(image, centres)
+        else:
+            depths = [0.5] * N
 
         # Add object nodes
         for idx, (box, lab, sc) in enumerate(zip(boxes_xyxy, labels, scores)):
@@ -329,7 +340,7 @@ class SceneGraphBuilder:
                 node_attrs["clip_emb"] = clip_embs[idx]  # list[float]
             if self.cfg.store_color:
                 node_attrs["color"] = dom_colors[idx]
-            if self.cfg.store_depth:
+            if self.cfg.store_depth or depths is not None:
                 node_attrs["depth_norm"] = float(depths[idx])
 
             G.add_node(idx, **node_attrs)
@@ -338,7 +349,10 @@ class SceneGraphBuilder:
         scene_id: Optional[int] = None
         if self.cfg.add_scene_node:
             scene_id = len(G)
-            G.add_node(scene_id, label="scene")
+            if caption:
+                G.add_node(scene_id, label="scene", caption=str(caption))
+            else:
+                G.add_node(scene_id, label="scene")
             for i in range(N):
                 G.add_edge(scene_id, i)
 

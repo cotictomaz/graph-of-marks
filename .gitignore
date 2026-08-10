@@ -17,6 +17,10 @@ __pycache__/
 *.pt
 *.json
 
+# Published reproduction inputs and schemas. Benchmark outputs remain ignored.
+!reproduction/manifests/*_author.json
+reproduction/data/
+
 
 **/data/
 **/data1/
@@ -51,6 +55,14 @@ dist/
 demo_output/
 external_libs/
 tests/
+!tests/
+!tests/**/*.py
 scripts_test/
 
 .coverage
+# Review/eval artifacts
+data_subsample/
+data_paper/
+paper_reference/
+reproduction/afk_runs/
+reproduction/queue_runs/

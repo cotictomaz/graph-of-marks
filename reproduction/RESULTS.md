@@ -1,0 +1,133 @@
+# Verified Results — AAAI-26 Table 2 reproduction
+
+Completed 2026-08-10 on the exact author image splits. This supersedes the earlier
+single-experiment record; the incompatible released-artifact scores are kept at the end.
+
+## What was run
+
+| | |
+|---|---|
+| Data | the four exact 1,000-image author subsets (`manifests.yaml`), hash-verified on install |
+| Preprocessing | `paper_aaai26` profile, 4,000 images, six render variants each (24,000 renders), **0 failures** |
+| Graph audit | `audit_relations.py`: **0 hard consistency errors** on all four datasets — graph JSON, triples, and rendered arrows share one edge multiset |
+| Weights | all four SHA-256s in `weights.yaml` verified (`artifacts/preprocessing_weights.json`) |
+| Models | the three pinned revisions in `paper_spec.yaml` |
+| Decoding | seed 0, temperature 0.2, top_p 0.9, 512 max tokens |
+| Sampling | one canonical question per image → 1,000 rows per cell |
+| Scale | 3 models × 4 datasets × 7 conditions × 2 prompt profiles = 156,000 generations |
+
+Reproduce with `reproduction/run_afk.sh`, which is resumable at every stage.
+
+## Why there are two prompt profiles
+
+`paper_declared` reproduces the supplementary visual-SG prompt verbatim. That prompt
+appends *"Answer the question using a single word or phrase"* to the **raw** condition
+only; the marked conditions get no answer-format instruction. Since GQA and VQA are both
+scored by normalized exact match, the marked conditions answer in ~20 words and score
+**0.00 by construction** — a measurement of answer length, not of accuracy.
+
+`supplementary_concise` is the identical prompt set with that same instruction added to
+the marked conditions. The raw prompt is byte-identical between the two profiles, so the
+second profile isolates exactly this confound and is **the only fair comparison**.
+
+Never pool the two.
+
+## Table 2 — `supplementary_concise` (equal answer-format constraint)
+
+Primary metric: official VQA consensus (VQAv1/v2), normalized exact match (GQA),
+region IoU ≥ 0.9 (RefCOCOg).
+
+| model | dataset | raw | segmented | som_numeric | gom_text | gom_numeric | gom_text_lab | gom_num_lab |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| gemma3_4b | GQA | 48.00 | 45.20 | 46.50 | **48.60** | 46.50 | 46.40 | 44.80 |
+| gemma3_4b | VQAv1 | **60.47** | 60.25 | 58.26 | 59.93 | 57.54 | 58.36 | 55.27 |
+| gemma3_4b | VQAv2 | **58.74** | 57.58 | 54.60 | 55.77 | 54.50 | 54.22 | 52.08 |
+| gemma3_4b | RefCOCOg | — | — | 44.75 | **45.13** | 36.62 | 41.92 | 34.11 |
+| qwen25_vl_7b | GQA | **74.50** | 60.90 | 58.80 | 59.00 | 57.60 | 57.10 | 57.00 |
+| qwen25_vl_7b | VQAv1 | **87.86** | 71.14 | 70.03 | 68.88 | 66.82 | 65.68 | 63.88 |
+| qwen25_vl_7b | VQAv2 | **86.04** | 70.25 | 67.85 | 68.62 | 64.75 | 64.89 | 62.61 |
+| qwen25_vl_7b | RefCOCOg | — | — | **39.35** | 22.43 | 32.71 | 21.58 | 34.13 |
+| llamav_o1_11b | GQA | **61.50** | 27.80 | 25.50 | 24.20 | 24.70 | 20.60 | 18.50 |
+| llamav_o1_11b | VQAv1 | **78.34** | 37.19 | 37.34 | 33.90 | 35.63 | 25.64 | 27.20 |
+| llamav_o1_11b | VQAv2 | **75.38** | 33.40 | 33.18 | 29.63 | 32.55 | 24.71 | 24.84 |
+| llamav_o1_11b | RefCOCOg | — | — | **33.12** | 0.95 | 23.92 | 1.05 | 13.66 |
+
+RefCOCOg has no raw/segmented condition: the task requires nameable region marks. Its
+cells are identical across both profiles because `run_table2.py` uses the REC prompt
+regardless of profile.
+
+## Findings
+
+**1. Marks never improve VQA, for any of the three models.** Best marked variant minus raw:
+
+| model | GQA | VQAv1 | VQAv2 |
+|---|---:|---:|---:|
+| gemma3_4b | +0.60 | −0.54 | −1.16 |
+| qwen25_vl_7b | −13.60 | −16.72 | −15.79 |
+| llamav_o1_11b | −33.70 | −41.00 | −41.98 |
+
+Gemma is at parity — its +0.60 on GQA is inside noise (two runs of the *identical* raw
+prompt differed by 0.10, and n=1,000 gives a standard error near 1.5 points). Qwen and
+LlamaV are harmed decisively.
+
+**2. The damage is the overlay itself, not the scene graph.** For Qwen, `segmented` —
+contours only, no IDs, no arrows, no relations — already costs 13.6 to 16.7 points, and it
+is Qwen's *best* marked condition on every VQA dataset. Adding IDs, then relation labels,
+costs a little more. So the loss is dominated by occluding the photo, not by errors in the
+graph or by ID leakage into answers.
+
+**3. The best mark style is model-dependent** (RefCOCOg, IoU ≥ 0.9):
+
+| model | best | text IDs | numeric IDs |
+|---|---|---:|---:|
+| gemma3_4b | `gom_text` 45.13 | 45.13 | 36.62 |
+| qwen25_vl_7b | `som_numeric` 39.35 | 22.43 | 32.71 |
+| llamav_o1_11b | `som_numeric` 33.12 | 0.95 | 23.92 |
+
+Gemma reads text IDs best; Qwen and LlamaV need numeric ones, with a 23-point swing for
+Qwen and a near-total failure for LlamaV on the same render. Relation labels cost 1–3
+points for every model. A single fixed render therefore cannot be optimal across models.
+
+**4. RefCOCOg is the one place marks are indispensable** — raw is 0 by construction. At
+45.13, Gemma is well above the 26.9 this repo recorded for the pre-fix render (§9a), so the
+preprocessing corrections nearly doubled REC accuracy.
+
+**5. LlamaV-o1's marked-condition numbers are partly a format artifact.** It answers raw in
+1.1 words but marked conditions in 15–16: the marks trigger its reasoning mode. Under a
+lenient phrase-compatibility scorer its GQA marked conditions rise from 18.5–27.8 to
+25.1–34.9, against 63.6 raw — so format explains roughly 7 points and the remaining ~29 is
+real degradation. Its RefCOCOg text-ID scores near 1.0 because the ID string rarely
+survives its chain of thought. Read every LlamaV marked cell with this caveat.
+
+## Caveats
+
+- **One decode setting, not the published 27-point grid.** Every cell is a single
+  (seed 0, temp 0.2, top_p 0.9) run, so `std/min/max` in the JSON are degenerate and the
+  reports carry `"runs": 1`. The grid multiplies cost by 27.
+- **One question per image** (`--one-per-image`), matching the paper's one-render-per-image
+  contract; GQA in particular has far more questions available per image.
+- **VQAv1/VQAv2 images come from COCO `train2014`**, which is what the author manifest
+  specifies. Qwen's 86–88 raw may partly reflect train-split familiarity; these are not
+  clean held-out scores.
+- **Gemma's GQA raw (48.0) remains ~8 points below the paper's 56.2.** Unexplained; §5.5
+  attributes it to sample selection rather than the metric or prompt.
+- Three environment fixes were required on this Blackwell (sm_120) GPU and are recorded in
+  `run_afk.sh` and `compat/sitecustomize.py`: a `max_num_seqs` cap for the multimodal
+  profile run, a vision-tower attention override for Qwen, and folding the system prompt
+  into the user turn for Mllama. None affects decoding.
+
+## Released-artifact compatibility check (unchanged, do not pool)
+
+The released Gemma VQAv2 JSON artifacts scored against the same 5,180 rows with VQA
+normalization. Single runs, different bare prompt.
+
+| Released artifact | Accuracy |
+|---|---:|
+| Raw | 63.25 |
+| Segmented | 53.77 |
+| GoM text IDs | 49.56 |
+| GoM numeric IDs | 51.77 |
+| GoM text IDs + relation labels | 49.96 |
+| GoM numeric IDs + relation labels | 51.04 |
+
+These do not reproduce the published improvement and must not be merged with the runs above.
