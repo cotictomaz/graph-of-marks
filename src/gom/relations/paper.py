@@ -212,6 +212,18 @@ class FastTextSimilarity:
         return self._vectors
 
     def __call__(self, left: str, right: str) -> float:
+        """Similarity of the best-matching query token to the label.
+
+        The left side is a whole question and the right side a short object label,
+        so averaging every left token dilutes the query with function words:
+        "Are there either any helmets or horses in this image?" against "horse"
+        scores 0.27 as a sentence mean but 0.84 token-wise. Under the mean, no
+        pair ever reached the paper's 0.5 query-object threshold, so Algorithm 3's
+        semantic half never fired and only exact lexical hits survived - which
+        also miss plurals ("horses" does not contain "horse" as a whole word).
+        Taking the max over query tokens still separates cleanly: unrelated pairs
+        ("What color is the bus?" vs "horse") stay near 0.20.
+        """
         vectors = self._load()
         if vectors is None:
             return 0.0
@@ -221,10 +233,20 @@ class FastTextSimilarity:
             return 0.0
         import numpy as np
 
-        left_vec = np.mean([vectors[token] for token in left_tokens], axis=0)
         right_vec = np.mean([vectors[token] for token in right_tokens], axis=0)
-        denominator = float(np.linalg.norm(left_vec) * np.linalg.norm(right_vec))
-        return float(np.dot(left_vec, right_vec) / denominator) if denominator else 0.0
+        right_norm = float(np.linalg.norm(right_vec))
+        if not right_norm:
+            return 0.0
+        best = 0.0
+        for token in left_tokens:
+            left_vec = vectors[token]
+            left_norm = float(np.linalg.norm(left_vec))
+            if left_norm:
+                best = max(
+                    best,
+                    float(np.dot(left_vec, right_vec) / (left_norm * right_norm)),
+                )
+        return best
 
 
 def _relation_relevant(

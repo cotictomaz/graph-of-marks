@@ -18,6 +18,7 @@ from common import (
     REPRODUCTION_ROOT,
     ROOT,
     canonical_rows,
+    first_row_per_image,
     load_yaml,
     sha256_file,
     write_jsonl,
@@ -272,17 +273,34 @@ def prepare(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
         output = args.data_root / "prepared" / dataset
         write_jsonl(rows, output / "eval.jsonl")
         if args.artifact_granularity == "image":
-            # The published preprocessing input is image-level.  Keeping every
-            # question here would rerun SAM/depth for each repeated image and
-            # changes the paper's artifact contract.
-            seen_images: set[str] = set()
+            # One render per image, but conditioned on that image's first canonical
+            # question. Dropping the question is NOT equivalent: Algorithm 3
+            # (filter_paper_graph) matches object labels against the query, so an
+            # empty question matches nothing, falls into its `if not matched` branch,
+            # and silently keeps every detected object. Keeping every question
+            # instead would rerun SAM/depth per question, which the paper's
+            # one-render-per-image contract does not do.
+            #
+            # RefCOCOg is deliberately excluded: its "question" is the referring
+            # expression itself, so conditioning the graph on it would prune the
+            # render down to the referent and leak the answer the REC task asks for.
+            condition_on_question = dataset != "refcocog"
+            if condition_on_question and not args.one_per_image:
+                raise ValueError(
+                    f"{dataset}: --artifact-granularity image conditions each render on "
+                    "the image's first canonical question, which is only valid when "
+                    "inference scores one question per image. Pass --one-per-image, or "
+                    "use --artifact-granularity question."
+                )
+            # Same selector inference uses, so each render is conditioned on exactly
+            # the question that will be scored against it.
             preproc = []
-            for row in rows:
-                image_path = row["image_path"]
-                if image_path in seen_images:
-                    continue
-                seen_images.add(image_path)
-                preproc.append({"image_path": image_path})
+            for row in first_row_per_image(rows):
+                entry_row = {"image_path": row["image_path"]}
+                if condition_on_question:
+                    entry_row["question"] = row["question"]
+                    entry_row["question_id"] = row["question_id"]
+                preproc.append(entry_row)
         else:
             preproc = [
                 {

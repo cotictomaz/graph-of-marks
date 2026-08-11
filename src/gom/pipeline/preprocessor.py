@@ -4147,6 +4147,17 @@ class ImageGraphPreprocessor:
             )
 
             fasttext = FastTextSimilarity(self.cfg.paper_fasttext_path)
+            if not question_text:
+                # Algorithm 3 matches object labels against the query. With no query
+                # nothing matches and filter_paper_graph keeps every detected object,
+                # so the run silently evaluates a mark-everything render instead of the
+                # paper's query-filtered subgraph. Say so loudly rather than produce
+                # artifacts that look correct.
+                self.logger.warning(
+                    "[ALG3] No question supplied: query-based filtering is INACTIVE and "
+                    "every detected object will be marked. Pass a question per row to "
+                    "run Algorithm 3 as published."
+                )
             if (
                 question_text
                 and self.cfg.paper_require_fasttext
