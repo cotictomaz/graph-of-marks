@@ -6,6 +6,68 @@ three paper models over the Cartesian 27-setting decode grid, and scores each da
 its declared protocol. Exact image membership is enforced. Query provenance and known
 paper/data conflicts are reported rather than silently treated as exact.
 
+## Fresh Machine Setup
+
+Host prerequisites: Docker with the NVIDIA container runtime (`--gpus all`),
+`nvidia-smi`, python3 on the host (the harness itself is stdlib-only), and about
+120 GB free — ~40 GB of Docker images, ~44 GB of model weights, ~7 GB of FastText
+vectors, and the data root.
+
+Exactly one artifact cannot be fetched from the internet and must be copied from a
+machine that already has it:
+
+```
+data_paper/gom_datasets.zip     605 MB
+sha256 a9c0f446ed4d99bcb7e00cbc3cd686d9fe19149ad3a1015a379e05569992f404
+```
+
+It holds the four exact 1,000-image author splits. `GOM_DATASET_ARCHIVE` overrides
+the path. Everything else — Docker images, detector/segmenter/depth weights, the
+three VLMs, the FastText vectors, the annotations — is rebuilt or downloaded.
+
+```bash
+cp /path/to/gom_datasets.zip data_paper/     # the one manual step
+cp .env.example .env                         # then set HF_TOKEN (Gemma-3 is gated)
+reproduction/run_afk.sh                      # or nohup setsid ... & to go AFK
+```
+
+`run_afk.sh` preflights the host, builds both images, downloads every model into
+`$MODEL_CACHE`, SHA-256-verifies the four pinned weights, installs the image
+splits, converts FastText, then preprocesses, audits, infers and scores. Every
+stage is idempotent, so re-running after a failure resumes. Logs land in
+`reproduction/afk_runs/<timestamp>/`.
+
+To drive the stages yourself instead, see **One Command** below; `run_afk.sh` is a
+wrapper over the same `reproduce.py` entry points.
+
+### Knobs
+
+| variable | default | why |
+|---|---|---|
+| `GOM_MODEL_CACHE` | `~/.cache/gom-paper` | mounted at `/model-cache`; holds all HF/torch.hub downloads |
+| `GOM_DATASET_ARCHIVE` | `data_paper/gom_datasets.zip` | the hand-carried archive |
+| `GOM_BLACKWELL` | `0` | set to `1` on sm_120 (RTX 5090 etc.) — pins the Qwen2.5-VL vision tower to `TORCH_SDPA`, working around an xformers FA3 crash. Unnecessary on Ampere/Ada. |
+| `GOM_VRAM_GEMMA3_4B` | `16000` | free-VRAM floor in MiB before the model is launched |
+| `GOM_VRAM_QWEN25_VL_7B` | `24000` | |
+| `GOM_VRAM_LLAMAV_O1_11B` | `28000` | |
+| `GOM_PROFILES` | `paper_declared supplementary_concise` | prompt profiles to run |
+
+The floors are the levels at which each model actually loaded on the original box
+(weights + vLLM's multimodal profile run + KV cache, not weights alone). Lower them
+on a smaller GPU and expect to also lower `--inference-batch-size`.
+
+The cu128 images run unchanged on Ampere and Ada; `GOM_BLACKWELL` and the VRAM
+floors are the only GPU-specific settings.
+
+### If a weight hash mismatches
+
+`weights.yaml` pins SHA-256s for `yolov8x.pt`, `sam_hq_vit_h.pth`,
+`model_final_a3ec72.pkl` and `dpt_large_384.pt`. `ultralytics` and the detectron2
+and MiDaS revisions are version-pinned, so those downloads are deterministic, but
+SAM-HQ is fetched from the mutable `lkeab/hq-sam` HF main branch. If `verify_weights`
+reports a mismatch, that is the check working — copy `checkpoints/sam_hq_vit_h.pth`
+from the source machine rather than re-registering the new hash.
+
 ## Data Provenance
 
 All four exact 1,000-image author subsets are stored in `data_paper/gom_datasets.zip`
@@ -88,6 +150,11 @@ docker run --rm -v "$PWD:$PWD" -w "$PWD" gom-paper-preprocess:1 \
   python3 reproduction/prepare_fasttext.py \
   /path/to/cc.en.300.vec /path/to/cc.en.300.kv
 ```
+
+Add `--download` to fetch `cc.en.300.vec.gz` from
+`dl.fbaipublicfiles.com/fasttext/vectors-crawl/` and decompress it first when the
+source file is absent (~1.3 GB compressed, 4.3 GB expanded). `run_afk.sh` does this
+automatically when the `.kv` pair is missing.
 
 The `.kv` output has a companion NumPy file created by gensim; keep both together.
 The reproduction command requires both files and records their SHA-256 hashes in

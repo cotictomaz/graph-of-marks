@@ -2,9 +2,6 @@
 include README.md
 include LICENSE
 
-# Include requirements
-include build/requirements.txt
-
 # Include documentation
 recursive-include docs *.md *.rst
 

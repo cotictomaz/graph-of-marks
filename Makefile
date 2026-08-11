@@ -284,34 +284,24 @@ run_vqa_folder:
 	$(MAKE) run_vqa IMAGE_DIR=$(IMAGE_FOLDER) VQA_INPUT_FILE= SINGLE_QUESTION="$(FIXED_PROMPT)"
 
 #------------------------------------------------------------------------------
-# Dataset download (kept as before)
+# Dataset download
 #------------------------------------------------------------------------------
+# The old scripts/download/*.sh helpers are gone.  The paper's exact 1,000-image
+# splits are installed from the hand-carried archive instead; see
+# reproduction/README.md "Fresh Machine Setup".
 download_dataset:
-ifndef DATASET
-	$(error DATASET is required for download targets)
-endif
-	bash scripts/download/download_dataset.sh -d "$(DATASET)" $(if $(DATASET_DIR),-o "$(DATASET_DIR)")
-
-download_coco:
-	$(MAKE) download_dataset DATASET=coco
-
-download_gqa:
-	$(MAKE) download_dataset DATASET=gqa
-
-download_refcoco:
-	$(MAKE) download_dataset DATASET=refcoco
-
-download_vqa:
-	$(MAKE) download_dataset DATASET=vqa
-
-download_textvqa:
-	$(MAKE) download_dataset DATASET=textvqa
+	@echo "Removed.  Use: ./reproduce.sh datasets --data-root <dir>"
+	@echo "See reproduction/README.md for the archive it reads."
+	@false
 
 #------------------------------------------------------------------------------
 # Install dependencies
 #------------------------------------------------------------------------------
+# Host-side install of the package for development.  The reproduction path does
+# not use this -- it runs entirely in the two pinned images under
+# reproduction/docker/.
 install_deps:
-	python3 -m pip install --no-cache-dir -r build/requirements.txt
+	python3 -m pip install --no-cache-dir -e ".[all]"
 	python3 -m spacy download en_core_web_md
 	python3 -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
 
@@ -336,8 +326,8 @@ help:
 	@echo "    make run_vqa VQA_INPUT_FILE=data.json MODEL_NAME=llava-hf/llava-1.5-7b-hf"
 	@echo "    make run_vqa_folder IMAGE_FOLDER=path/to/images [FIXED_PROMPT='Describe this']"
 	@echo ""
-	@echo "DATASET DOWNLOAD:"
-	@echo "    make download_coco|download_gqa|download_refcoco|download_vqa|download_textvqa"
+	@echo "DATASETS:"
+	@echo "    ./reproduce.sh datasets --data-root <dir>   # see reproduction/README.md"
 	@echo ""
 	@echo "UTILITIES:"
 	@echo "    make install_deps"

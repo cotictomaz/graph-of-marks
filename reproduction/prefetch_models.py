@@ -12,12 +12,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import PAPER_SPEC, load_yaml
+from common import PAPER_SPEC, ROOT, load_yaml
 
 OWLV2 = "google/owlv2-base-patch16"
 MIDAS_REPO = "isl-org/MiDaS:1645b7e1675301fdfac03640738fe5a6531e17d6"
 MIDAS_MODEL = "DPT_Large"
 DETECTRON2_CONFIG = "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+SAM_HQ_TYPE = "vit_h"
+YOLO_WEIGHTS = "yolov8x.pt"
 
 
 def fetch_preprocess() -> None:
@@ -38,6 +40,26 @@ def fetch_preprocess() -> None:
     url = model_zoo.get_checkpoint_url(DETECTRON2_CONFIG)
     print(f"-> Detectron2 {url}", flush=True)
     print(PathManager.get_local_path(url), flush=True)
+
+    # SAM-HQ and YOLOv8 normally self-download on first use, but verify_weights.py
+    # runs before preprocessing, so a fresh machine would fail there instead.  Both
+    # land under the working directory, which every stage sets to the repo root --
+    # the same place verify_weights.py searches.
+    from gom.segmentation.samhq import _SAM_HQ_URLS
+
+    checkpoint = ROOT / "checkpoints" / f"sam_hq_{SAM_HQ_TYPE}.pth"
+    if checkpoint.is_file():
+        print(f"-> SAM-HQ cached {checkpoint}", flush=True)
+    else:
+        url = _SAM_HQ_URLS[SAM_HQ_TYPE]
+        print(f"-> SAM-HQ {url}", flush=True)
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        torch.hub.download_url_to_file(url, str(checkpoint), progress=False)
+
+    from ultralytics import YOLO
+
+    print(f"-> YOLOv8 {YOLO_WEIGHTS}", flush=True)
+    YOLO(str(ROOT / YOLO_WEIGHTS))
 
 
 def fetch_inference() -> None:

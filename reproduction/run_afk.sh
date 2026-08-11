@@ -15,10 +15,20 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 DATA_ROOT=$ROOT/reproduction/data
 FASTTEXT=$DATA_ROOT/cc.en.300.kv
-MODEL_CACHE=${GOM_MODEL_CACHE:-/llms}
+# Same default as reproduce.py, so both entry points share one cache.  The box
+# this ran on originally used GOM_MODEL_CACHE=/llms.
+MODEL_CACHE=${GOM_MODEL_CACHE:-$HOME/.cache/gom-paper}
 MODELS="gemma3_4b qwen25_vl_7b llamav_o1_11b"
-PROFILES="paper_declared supplementary_concise"
+PROFILES=${GOM_PROFILES:-"paper_declared supplementary_concise"}
 DATASETS=gqa,vqav1,vqav2,refcocog
+DATASET_ARCHIVE=${GOM_DATASET_ARCHIVE:-$ROOT/data_paper/gom_datasets.zip}
+# Free VRAM each model needs before it is launched; see the inference section.
+VRAM_GEMMA3_4B=${GOM_VRAM_GEMMA3_4B:-16000}
+VRAM_QWEN25_VL_7B=${GOM_VRAM_QWEN25_VL_7B:-24000}
+VRAM_LLAMAV_O1_11B=${GOM_VRAM_LLAMAV_O1_11B:-28000}
+# sm_120 (Blackwell) needs the Qwen vision tower forced off xformers' FA3 kernel.
+# Harmless elsewhere, but it costs throughput, so keep it opt-in.
+BLACKWELL=${GOM_BLACKWELL:-0}
 
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
 LOGS=$ROOT/reproduction/afk_runs/$RUN_ID
@@ -75,8 +85,10 @@ wait_for_vram() {
 docker_prefetch() {
     local image=$1
     shift
+    local env_file=()
+    [ -f "$ROOT/.env" ] && env_file=(--env-file "$ROOT/.env")
     docker run --rm \
-        --env-file "$ROOT/.env" \
+        "${env_file[@]}" \
         -v "$ROOT:$ROOT" -v "$MODEL_CACHE:/model-cache" \
         -w "$ROOT" \
         -e PYTHONPATH="$ROOT/src" -e PYTHONUNBUFFERED=1 \
@@ -100,6 +112,33 @@ reproduce() {
 
 say "run $RUN_ID · model cache $MODEL_CACHE · logs $LOGS"
 
+# --------------------------------------------------------------- host preflight
+# Everything below takes hours.  Fail in seconds instead, naming the fix, so a
+# fresh machine does not discover a missing archive after a 20-minute image build.
+host_preflight() {
+    local problems=()
+    command -v docker  >/dev/null || problems+=("docker not on PATH")
+    command -v nvidia-smi >/dev/null || problems+=("nvidia-smi not on PATH (NVIDIA container runtime required)")
+    [ -f "$ROOT/.env" ] || problems+=("missing $ROOT/.env — copy .env.example and set HF_TOKEN (Gemma-3 is gated)")
+    [ -f "$DATASET_ARCHIVE" ] || problems+=("missing $DATASET_ARCHIVE — copy it from the source machine or set GOM_DATASET_ARCHIVE")
+    mkdir -p "$MODEL_CACHE" 2>/dev/null || problems+=("cannot create model cache $MODEL_CACHE")
+    [ -w "$MODEL_CACHE" ] || problems+=("model cache $MODEL_CACHE is not writable")
+    local free_gb
+    free_gb=$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc '0-9')
+    [ "${free_gb:-0}" -ge 120 ] || problems+=("only ${free_gb}G free at $ROOT; ~120G needed (images, weights, artifacts)")
+    if [ ${#problems[@]} -gt 0 ]; then
+        local problem
+        say "preflight failed:"
+        for problem in "${problems[@]}"; do say "  - $problem"; done
+        return 1
+    fi
+    say "gpu: $(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader)"
+}
+# Called directly rather than through stage(), so the fix-it messages reach the
+# terminal instead of a log file nobody is watching yet.
+STAGE=host_preflight
+host_preflight
+
 # ---------------------------------------------------------------- environment
 stage build_preprocess docker build -f "$ROOT/reproduction/docker/preprocess.Dockerfile" \
     -t gom-paper-preprocess:1 "$ROOT"
@@ -114,6 +153,20 @@ stage fetch_inference_models docker_prefetch gom-paper-inference:1 \
 stage verify_weights docker_prefetch gom-paper-preprocess:1 \
     python3 reproduction/verify_weights.py --cache /model-cache \
     --output "$DATA_ROOT/artifacts/preprocessing_weights.json"
+
+# Idempotent: prepare_datasets.py re-verifies the archive hash and every installed
+# image basename, and skips files already in place.
+stage datasets reproduce datasets --dataset-archive "$DATASET_ARCHIVE"
+
+# Algorithm 3's semantic half is inert without these, and preflight hard-requires
+# both the .kv and its .vectors.npy companion.  ~4.3 GB download, once per machine.
+if [ -f "$FASTTEXT" ] && [ -f "$FASTTEXT.vectors.npy" ]; then
+    say "fasttext already converted at $FASTTEXT — skipping"
+else
+    stage fasttext docker_prefetch gom-paper-preprocess:1 \
+        python3 reproduction/prepare_fasttext.py --download \
+        "$DATA_ROOT/cc.en.300.vec" "$FASTTEXT"
+fi
 
 # ------------------------------------------------------------- preprocessing
 # Two workers each load a full model stack; only spawn the second one when the
@@ -158,23 +211,28 @@ TOTAL=$(vram_total)
 for profile in $PROFILES; do
     done_models=""
     for model in $MODELS; do
-        # Per-model engine settings, each forced by a measured failure on this
-        # Blackwell (sm_120) GPU -- see reproduction/compat/sitecustomize.py:
-        #   qwen  - its ViT crashes on xformers' FA3 Hopper kernel, so the vision
-        #           tower is pinned to TORCH_SDPA via the compat sitecustomize.
+        # Per-model engine settings, each forced by a measured failure:
+        #   qwen  - on sm_120 its ViT crashes on xformers' FA3 Hopper kernel, so the
+        #           vision tower is pinned to TORCH_SDPA via the compat sitecustomize
+        #           (GOM_BLACKWELL=1; unnecessary on Ampere/Ada).
         #   qwen/llamav - their worst-case multimodal profile run OOMs at vLLM's
         #           default max_num_seqs regardless of gpu_memory_utilization.
+        # VRAM floors are the levels at which each model actually loaded here;
+        # override per model with GOM_VRAM_<MODEL> on a differently sized GPU.
         extra=""
         case $model in
             gemma3_4b)
-                need=16000 ;;
+                need=$VRAM_GEMMA3_4B ;;
             qwen25_vl_7b)
-                need=24000
-                extra="--max-num-seqs 8
-                    --container-env GOM_VIT_ATTN_BACKEND=TORCH_SDPA
-                    --container-env PYTHONPATH=$ROOT/reproduction/compat:$ROOT/src" ;;
+                need=$VRAM_QWEN25_VL_7B
+                extra="--max-num-seqs 8"
+                if [ "$BLACKWELL" = 1 ]; then
+                    extra="$extra
+                        --container-env GOM_VIT_ATTN_BACKEND=TORCH_SDPA
+                        --container-env PYTHONPATH=$ROOT/reproduction/compat:$ROOT/src"
+                fi ;;
             llamav_o1_11b)
-                need=28000
+                need=$VRAM_LLAMAV_O1_11B
                 # Mllama's chat template rejects a system role next to an image.
                 extra="--max-num-seqs 8 --fold-system-into-user" ;;
         esac

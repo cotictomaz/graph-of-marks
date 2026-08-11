@@ -276,13 +276,19 @@ The [`examples/`](examples/) directory contains:
 ## Docker
 
 ```bash
-# Build the container
-docker build -f build/Dockerfile -t gom:latest .
+# Build the preprocessing image (fully pinned; see reproduction/docker/)
+docker build -f reproduction/docker/preprocess.Dockerfile -t gom-paper-preprocess:1 .
 
-# Run with GPU support
-docker run --rm --gpus all -v $(pwd):/workdir gom:latest \
-    gom-preprocess --input_file data.json
+# Run with GPU support.  The repo is mounted at its host path, not /workdir.
+docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" \
+    -e PYTHONPATH="$PWD/src" gom-paper-preprocess:1 \
+    python3 src/image_preprocessor.py --json_file data.json --output_folder out/
 ```
+
+A second image, `reproduction/docker/inference.Dockerfile`, provides the vLLM
+inference stack. To set both up on a new machine, see
+[`reproduction/README.md`](reproduction/README.md) — `reproduction/run_afk.sh`
+builds the images, downloads every model, and runs the full pipeline unattended.
 
 ---
 
