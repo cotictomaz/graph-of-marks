@@ -62,7 +62,7 @@ regardless of profile.
 
 | model | GQA | VQAv1 | VQAv2 |
 |---|---:|---:|---:|
-| gemma3_4b | +0.60 | −0.54 | −1.16 |
+| gemma3_4b | +0.60 | −0.22 | −1.16 |
 | qwen25_vl_7b | −13.60 | −16.72 | −15.79 |
 | llamav_o1_11b | −33.70 | −41.00 | −41.98 |
 
@@ -71,10 +71,12 @@ prompt differed by 0.10, and n=1,000 gives a standard error near 1.5 points). Qw
 LlamaV are harmed decisively.
 
 **2. The damage is the overlay itself, not the scene graph.** For Qwen, `segmented` —
-contours only, no IDs, no arrows, no relations — already costs 13.6 to 16.7 points, and it
-is Qwen's *best* marked condition on every VQA dataset. Adding IDs, then relation labels,
-costs a little more. So the loss is dominated by occluding the photo, not by errors in the
-graph or by ID leakage into answers.
+filled masks + contours, no IDs, no arrows, no relations — already costs 13.6 to 16.7
+points, and it is Qwen's *best* marked condition on every VQA dataset. Adding IDs, then
+relation labels, costs a little more. So the loss is dominated by occluding the photo, not
+by errors in the graph or by ID leakage into answers. Note the paper profile *fills* the
+masks (declared α 0.25; effectively 0.4375 in this run — see Caveats), it does not draw
+contours only.
 
 **3. The best mark style is model-dependent** (RefCOCOg, IoU ≥ 0.9):
 
@@ -99,6 +101,31 @@ lenient phrase-compatibility scorer its GQA marked conditions rise from 18.5–2
 real degradation. Its RefCOCOg text-ID scores near 1.0 because the ID string rarely
 survives its chain of thought. Read every LlamaV marked cell with this caveat.
 
+## Appearance-filtered re-score (2026-08-14)
+
+The filled overlay recolors objects, so any question about surface appearance (color,
+material, texture, text in the image) is answered against a corrupted image.
+`reproduction/question_filter.py` drops those questions — color-type questions,
+material/texture/pattern and text-in-image keywords, any color word in the question, or a
+color word in ≥50% of the gold answers — and `score_table2.py --question-filter appearance`
+re-scores the existing predictions on the surviving canonical images (whole images, never
+individual rows). Kept 654/832/789 of 1,000 for GQA/VQAv1/VQAv2. Full table:
+`data/table2_report.supplementary_concise.appearance_filtered.{json,md}`.
+
+Δ = best marked − raw, all questions vs appearance-filtered:
+
+| model | GQA all | GQA filt | VQAv1 all | VQAv1 filt | VQAv2 all | VQAv2 filt |
+|---|---:|---:|---:|---:|---:|---:|
+| gemma3_4b | +0.60 | **+3.06** | −0.22 | **+4.42** | −1.16 | **+3.02** |
+| qwen25_vl_7b | −13.60 | −8.56 | −16.72 | −12.50 | −15.79 | −12.42 |
+| llamav_o1_11b | −33.70 | −35.17 | −41.00 | −35.62 | −41.98 | −35.82 |
+
+The appearance confound explains Gemma entirely: on non-appearance questions its best
+marked condition beats raw by 3.0–4.4 points on all three datasets. It does not explain
+Qwen (still −8.6 to −12.5) or LlamaV (still ~−35). Marks help only the weakest of the
+three models, and only once appearance questions are excluded — do not present this as
+reproducing the paper's across-model gains.
+
 ## Caveats
 
 - **One decode setting, not the published 27-point grid.** Every cell is a single
@@ -111,6 +138,14 @@ survives its chain of thought. Read every LlamaV marked cell with this caveat.
   clean held-out scores.
 - **Gemma's GQA raw (48.0) remains ~8 points below the paper's 56.2.** Unexplained; §5.5
   attributes it to sample selection rather than the metric or prompt.
+- **The run's renders double-applied the mask fill** (`visualizer.py` blended the fill,
+  then filled again per object), so effective opacity was 0.4375, not the declared 0.25.
+  Fixed 2026-08-14 (fill is now applied once); renders produced after that commit are
+  lighter than the recorded artifacts. Scores in this file are from the pre-fix renders.
+- **An abandoned third prompt profile, `visual_aid_concise`, exists on disk**
+  (`data/predictions/visual_aid_concise/`, 31,000 generations: Gemma complete, Qwen
+  GQA-only and partial, LlamaV absent). It was never scored and is excluded from every
+  table here. Finish or delete it before using it for anything.
 - Three environment fixes were required on this Blackwell (sm_120) GPU and are recorded in
   `run_afk.sh` and `compat/sitecustomize.py`: a `max_num_seqs` cap for the multimodal
   profile run, a vision-tower attention override for Qwen, and folding the system prompt

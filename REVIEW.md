@@ -553,9 +553,10 @@ prompt differ by 0.10). Qwen and LlamaV are decisively harmed. This confirms §6
 negative result on a far stronger basis — three models instead of one, both VQA datasets
 plus GQA, and with answer format controlled.
 
-**New: the damage is the overlay, not the graph.** For Qwen, `segmented` — contours only,
-no IDs, no arrows, no relations — already costs 13.6–16.7 points and is its *best* marked
-condition everywhere. Adding IDs and then relation labels costs only a little more. So the
+**New: the damage is the overlay, not the graph.** For Qwen, `segmented` — filled masks +
+contours (the paper profile fills at declared α 0.25, effectively 0.4375 in this run; it is
+*not* contours-only), no IDs, no arrows, no relations — already costs 13.6–16.7 points and
+is its *best* marked condition everywhere. Adding IDs and then relation labels costs only a little more. So the
 loss is dominated by occluding the photograph, not by scene-graph errors or ID leakage.
 That reframes §6b's diagnosis: fixing the render's IDs/labels cannot recover it.
 

@@ -191,29 +191,30 @@ numeric IDs. Do not present these as reproducing the paper's reported gains.
 
 ## Known confounds in the Table 2 negative result
 
-Established 2026-08-11 from the existing artifacts (no new compute). Read before interpreting
-`RESULTS.md` or designing a follow-up run.
+Established 2026-08-11 from the existing artifacts; **the appearance-filtered re-score was
+run properly on 2026-08-14** (scored, committed in `RESULTS.md` §"Appearance-filtered
+re-score"). Read before interpreting `RESULTS.md` or designing a follow-up run.
 
 **`segmented` is a filled render, not an outline.** `_PAPER_AAAI26_PROFILE` sets
 `fill_segmentation: True, seg_fill_alpha: 0.25` (`src/gom/config.py:399-400`), both locked in
 `PAPER_AAAI26_LOCKED_FIELDS`; the plain `PreprocessorConfig` default is the opposite
 (`preprocessor.py:634`, commented "Outline-only preserves image evidence for VQA"). All six paper
 variants inherit the fill. Verified visually: in `COCO_train2014_000000131127` a **black** t-shirt
-renders **blue**. `RESULTS.md:74` and `REVIEW.md:556` still say "contours only" — they are wrong,
-and that misdescription is why the run's conclusion stops at "the overlay occludes" without
-naming the fill as the cause.
+renders **blue**.
 
-**The fill is applied twice**, so effective opacity is **0.4375, not 0.25**: a vectorized blend at
-`src/gom/viz/visualizer.py:744-751`, then a per-object `ax.fill` at `:848-849`. Overlapping masks
-accumulate additively and clip to 1.0 (`src/gom/utils/rendering_opt.py:133-158`) — at ≥4
-overlapping masks the photo is entirely replaced. Every alpha figure in the paper and in
-`REVIEW.md:364` understates real opacity by ~75%.
+**In the recorded run the fill was applied twice**, so effective opacity was **0.4375, not
+0.25**: a vectorized blend plus a per-object `ax.fill`. **Fixed 2026-08-14** — the per-object
+call now passes `fill=False` (`src/gom/viz/visualizer.py:_draw_segmentation`), guarded by
+`test_filled_render_applies_fill_alpha_exactly_once`. Renders made after the fix are lighter
+than the run's artifacts. Overlapping masks still accumulate additively and clip to 1.0
+(`src/gom/viz/rendering_opt.py:133-158`). The same commit fixed the latent `border_y`
+`NameError` on the non-batch outside-label path.
 
 **The failure is evidence destruction, not label copying.** Models name the actual overlay palette
 color only 0–10% of the time, but 48–70% of color answers *change* versus raw.
 
 **Damage concentrates on surface-appearance questions**, not uniformly. Δ = best marked − raw on
-VQAv2, by question category:
+VQAv2, by question category (2026-08-11 ad-hoc recompute, never re-scored):
 
 | category | Gemma | Qwen | LlamaV |
 |---|---:|---:|---:|
@@ -226,30 +227,28 @@ VQAv2, by question category:
 Mask coverage correlates only weakly by comparison (Qwen VQAv2: −13.9 in the lowest coverage bin
 → −28.1 in the highest). Category dominates.
 
-**Projected effect of dropping appearance questions** — color, material/texture/pattern, text-in-
-image, plus any color word in the question or in ≥50% of gold answers. *Recomputed from the
-existing predictions; not yet produced by a scored run.* Kept 606/794/742 of 1000 for
-GQA/VQAv1/VQAv2:
+**Scored effect of dropping appearance questions** (2026-08-14, real `score_table2.py` run —
+official metrics, whole images dropped): filter in `reproduction/question_filter.py` (color
+questions, material/texture/pattern, text-in-image, color word in question or in ≥50% of gold
+answers), applied via `score_table2.py --question-filter appearance`. Kept 654/832/789 of
+1000 for GQA/VQAv1/VQAv2. Δ = best marked − raw:
 
 | model | | GQA | VQAv1 | VQAv2 |
 |---|---|---:|---:|---:|
 | gemma3_4b | all | +0.60 | −0.22 | −1.16 |
-| gemma3_4b | filtered | **+3.14** | **+3.56** | **+3.15** |
-| qwen25_vl_7b | filtered | −8.75 | −13.19 | −12.64 |
-| llamav_o1_11b | filtered | −35.15 | −36.74 | −36.39 |
+| gemma3_4b | filtered | **+3.06** | **+4.42** | **+3.02** |
+| qwen25_vl_7b | filtered | −8.56 | −12.50 | −12.42 |
+| llamav_o1_11b | filtered | −35.17 | −35.62 | −35.82 |
 
-So the appearance confound explains Gemma entirely and **leaves Qwen at −12.6 and LlamaV at −36.4
-unexplained**. **Next step: properly re-score all three models before designing any filter** — a
-filter that only rescues the smallest model is not yet a sufficient account of the result.
+The appearance confound explains Gemma entirely and **leaves Qwen at ~−12 and LlamaV at ~−35
+unexplained**. Marks help only the weakest model, and only off appearance questions — still
+not the paper's across-model gains. Full table:
+`reproduction/data/table2_report.supplementary_concise.appearance_filtered.{json,md}`.
 
-**Two render defects found and not fixed** (out of scope when found, still open):
-- the double mask fill above — `visualizer.py:744-751` + `:848-849`.
-- `visualizer.py:1350,1357` — `border_y` is never assigned, so the non-batch outside-label path
-  raises `NameError`. Unreachable today only because `use_batch_text_renderer=True`.
-
-**If a filtering stage is built later, it must drop whole images, not individual rows.**
-`score_table2.py:264-266` applies `first_row_per_image` to `eval.jsonl`, so dropping rows changes
-which question is canonical for an affected image and breaks the join to its `_q1` render artifact
-and to the existing predictions. Filtering only removes rows, so with an inner join on
-`question_id` (replacing the length assert at `score_table2.py:284`) the existing 156K generations
-re-score with no GPU cost.
+**Subset scoring mechanics** (implemented): `score_table2.py --question-filter appearance`
+filters the *prediction* list by `question_id` after a full-coverage check — never the eval
+rows, whose full list `first_row_per_image` and `graph_paths` depend on. Under
+`--one-per-image`, rows are 1:1 with images, so this drops whole images by construction.
+The verified unfiltered report is bit-identical with `--question-filter none` (checked).
+Always pass an explicit `--output`; `reproduce.py score` hardcodes the report name and would
+overwrite the verified one.
