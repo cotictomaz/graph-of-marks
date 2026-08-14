@@ -1,3 +1,4 @@
+from reproduction.question_filter import appearance_reason, keep_ids
 from reproduction.score_table2 import (
     maximum_iou_matches,
     normalize,
@@ -40,3 +41,31 @@ def test_rec_matching_can_reassign_an_earlier_prediction():
     predictions = [[0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.9, 1.0]]
     truths = [[0.0, 0.0, 0.9, 1.0], [0.0, 0.0, 1.0, 1.0]]
     assert maximum_iou_matches(predictions, truths, 0.89) == 2
+
+
+def test_appearance_filter_drops_each_appearance_category():
+    assert appearance_reason("What color is the car?", []) == "color_question"
+    assert appearance_reason("What is the table made of?", []) == "material_texture_pattern"
+    assert appearance_reason("What does the sign say?", []) == "text_in_image"
+    assert appearance_reason("Is the red car parked?", []) == "color_word_in_question"
+
+
+def test_appearance_filter_drops_color_majority_gold_answers():
+    answers = ["blue", "blue cup", "cup", "mug"]
+    assert appearance_reason("What is on the table?", answers) == "color_word_in_answers"
+    assert appearance_reason("What is on the table?", ["cup", "cup", "mug", "blue"]) is None
+
+
+def test_appearance_filter_keeps_neutral_questions():
+    assert appearance_reason("How many people are there?", ["2"] * 10) is None
+    assert appearance_reason("Is the man wearing a hat?", ["yes"] * 10) is None
+    assert appearance_reason("Where is the dog?", ["on the left"] * 10) is None
+
+
+def test_keep_ids_returns_surviving_question_ids():
+    rows = [
+        {"question_id": "a", "question": "What color is it?", "answers": []},
+        {"question_id": "b", "question": "How many dogs?", "answers": ["2"]},
+        {"question_id": "c", "question": "Is there a horse?", "answer": "yes"},
+    ]
+    assert keep_ids(rows) == {"b", "c"}

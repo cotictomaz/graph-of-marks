@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import PAPER_SPEC, first_row_per_image, load_yaml, sha256_file
+from question_filter import keep_ids
 
 
 CONTRACTIONS = {
@@ -247,6 +248,9 @@ def main() -> int:
     parser.add_argument("--one-per-image", action="store_true")
     parser.add_argument("--single-setting", action="store_true")
     parser.add_argument("--prompt-profile", default="paper_declared")
+    parser.add_argument(
+        "--question-filter", choices=("none", "appearance"), default="none"
+    )
     args = parser.parse_args()
     spec = load_yaml(PAPER_SPEC)
     datasets = [value.strip() for value in args.datasets.split(",") if value.strip()]
@@ -268,6 +272,9 @@ def main() -> int:
             by_id = {row["question_id"]: row for row in rows}
             preprocessing = args.data_root / "artifacts" / dataset / "preprocessing"
             graphs = graph_paths(rows, preprocessing, args.artifact_granularity)
+            keep = None
+            if args.question_filter == "appearance" and dataset != "refcocog":
+                keep = keep_ids(rows)
             for condition in spec["conditions"]:
                 if dataset == "refcocog" and condition in {"raw", "segmented"}:
                     continue
@@ -281,8 +288,14 @@ def main() -> int:
                     if not path.is_file():
                         raise FileNotFoundError(path)
                     predictions = read_jsonl(path)
-                    if len(predictions) != len(rows):
+                    if len(predictions) != len(rows) or {
+                        p["question_id"] for p in predictions
+                    } != set(by_id):
                         raise RuntimeError(f"{path}: incomplete prediction file")
+                    if keep is not None:
+                        predictions = [
+                            p for p in predictions if p["question_id"] in keep
+                        ]
                     scores = []
                     released_code_scores = []
                     for prediction in predictions:
@@ -314,6 +327,9 @@ def main() -> int:
                     "dataset": dataset,
                     "condition": condition,
                     "prompt_profile": args.prompt_profile,
+                    "question_filter": args.question_filter,
+                    "n_scored": len(keep) if keep is not None else len(rows),
+                    "n_total": len(rows),
                     "runs": len(settings),
                     "mean_accuracy_points": statistics.mean(run_scores),
                     "std_accuracy_points": statistics.pstdev(run_scores),
@@ -356,8 +372,8 @@ def main() -> int:
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     markdown = args.output.with_suffix(".md")
     lines = [
-        "| Model | Dataset | Condition | Primary accuracy | Released-code VQA compatibility |",
-        "|---|---|---|---:|---:|",
+        "| Model | Dataset | Condition | N | Primary accuracy | Released-code VQA compatibility |",
+        "|---|---|---|---:|---:|---:|",
     ]
     for row in report_rows:
         compatibility = (
@@ -368,6 +384,7 @@ def main() -> int:
         )
         lines.append(
             f"| {row['model']} | {row['dataset']} | {row['condition']} | "
+            f"{row['n_scored']}/{row['n_total']} | "
             f"{row['mean_accuracy_points']:.2f} +/- {row['std_accuracy_points']:.2f} | "
             f"{compatibility} |"
         )
