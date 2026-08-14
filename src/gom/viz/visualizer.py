@@ -757,8 +757,8 @@ class Visualizer:
                 mask_info = self._get_mask_for_index(original_idx, masks)
                 z_order = 2 + (len(boxes) - min(depth, len(boxes))) * 0.1
                 if mask_info is not None and mask_info.get("segmentation") is not None:
-                    # Draw contour stroke on top of blended image
-                    self._draw_segmentation(ax, mask_info["segmentation"], color, cfg.bbox_linewidth, z_order)
+                    # Contour stroke only: the fill was already blended above
+                    self._draw_segmentation(ax, mask_info["segmentation"], color, cfg.bbox_linewidth, z_order, fill=False)
                 elif cfg.show_bboxes:
                     self._draw_bbox(ax, x1, y1, x2, y2, color, cfg.bbox_linewidth, z_order)
         else:
@@ -800,7 +800,8 @@ class Visualizer:
         ax.add_patch(rect)
 
     def _draw_segmentation(
-        self, ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float, zorder: float = 2
+        self, ax: plt.Axes, mask: np.ndarray, color: str, linewidth: float, zorder: float = 2,
+        fill: bool = True,
     ) -> None:
         """
         Draw segmentation mask with filled interior and opaque border.
@@ -822,10 +823,11 @@ class Visualizer:
             - Skips degenerate contours (< 3 points)
         """
         # Use seg_fill_alpha from config (respects user setting)
-        alpha_to_use = self.cfg.seg_fill_alpha if self.cfg.fill_segmentation else 0.0
-        
+        do_fill = fill and self.cfg.fill_segmentation
+        alpha_to_use = self.cfg.seg_fill_alpha if do_fill else 0.0
+
         if cv2 is None:
-            if self.cfg.fill_segmentation:
+            if do_fill:
                 ax.imshow(mask.astype(float), alpha=alpha_to_use, extent=(0, mask.shape[1], mask.shape[0], 0),
                          cmap='Greys', vmin=0, vmax=1)
             ax.contour(mask.astype(bool), levels=[0.5], colors=[color], linewidths=[linewidth], zorder=zorder)
@@ -845,7 +847,7 @@ class Visualizer:
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
             # Fill mask region with transparency
-            if self.cfg.fill_segmentation:
+            if do_fill:
                 ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=alpha_to_use, zorder=zorder)
             # Draw opaque border for definition
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=1.0, zorder=zorder + 0.1)
@@ -1347,14 +1349,14 @@ class Visualizer:
                     pass
                 placed_texts.append(t)
                 outside_texts.append(t)
-                outside_anchors.append((border_x, border_y))
+                outside_anchors.append((border_x, border_pos[1]))
                 if bb is not None:
                     placed_bbs.append(bb)
 
                 # connector dall’anchor (bordo) alla label
                 ax.annotate(
                     "",
-                    xy=(border_x, border_y),
+                    xy=(border_x, border_pos[1]),
                     xytext=t.get_position(),
                     arrowprops=dict(
                         arrowstyle="-",

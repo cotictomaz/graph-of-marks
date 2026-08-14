@@ -38,6 +38,57 @@ def test_outline_render_preserves_pixels_and_dimensions(tmp_path):
     assert rendered.getpixel((36, 20)) == image.getpixel((36, 20))
 
 
+def test_filled_render_applies_fill_alpha_exactly_once(tmp_path):
+    import matplotlib.colors as mcolors
+
+    image = Image.new("RGB", (73, 41), (200, 200, 200))
+    mask = np.zeros((41, 73), dtype=bool)
+    mask[8:33, 15:58] = True
+    output = tmp_path / "filled.png"
+    cfg = VisualizerConfig(
+        display_labels=False,
+        display_relationships=False,
+        show_segmentation=True,
+        fill_segmentation=True,
+        seg_fill_alpha=0.25,
+        show_bboxes=False,
+        use_vectorized_masks=True,
+    )
+    viz = Visualizer(cfg)
+    color = mcolors.to_rgb(viz._assign_colors(["object"])[0])
+
+    viz.draw(
+        image,
+        boxes=[[15, 8, 58, 33]],
+        labels=["object"],
+        scores=[1.0],
+        relationships=[],
+        masks=[{"segmentation": mask}],
+        save_path=str(output),
+        dpi=160,
+    )
+
+    rendered = Image.open(output).convert("RGB")
+    # A double-applied fill would land at 0.5625*bg + 0.4375*color instead.
+    expected = tuple(0.75 * 200 + 0.25 * 255 * channel for channel in color)
+    got = rendered.getpixel((36, 20))
+    assert all(abs(g - e) <= 2 for g, e in zip(got, expected)), (got, expected)
+
+
+def test_draw_segmentation_fill_flag_controls_fill_artists():
+    mask = np.zeros((20, 20), dtype=bool)
+    mask[5:15, 5:15] = True
+    viz = Visualizer(
+        VisualizerConfig(show_segmentation=True, fill_segmentation=True, seg_fill_alpha=0.25)
+    )
+    fig, ax = plt.subplots()
+    viz._draw_segmentation(ax, mask, "#ff0000", 2.0, fill=False)
+    assert len(ax.patches) + len(ax.images) == 0
+    viz._draw_segmentation(ax, mask, "#ff0000", 2.0, fill=True)
+    assert len(ax.patches) + len(ax.images) > 0
+    plt.close(fig)
+
+
 def test_unsafe_legacy_relation_is_not_rendered():
     viz = Visualizer(VisualizerConfig())
     assert viz._preprocess_relations(
