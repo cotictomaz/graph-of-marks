@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         help="Run one explicit decoding setting as SEED,TEMPERATURE,TOP_P.",
     )
     parser.add_argument(
+        "--extra-conditions",
+        default="",
+        help="Comma-separated extra conditions beyond paper_spec (supported: text_graph).",
+    )
+    parser.add_argument(
         "--artifact-granularity", choices=("image", "question"), default="image"
     )
     parser.add_argument(
@@ -170,6 +175,16 @@ def prompt_for(row: dict, dataset: str, condition: str, profile: str) -> tuple[s
         descriptions = row.get("descriptions") or [row["question"]]
         return REC_SYSTEM, REC_USER.format(
             descriptions=json.dumps(descriptions, ensure_ascii=False)
+        )
+    if condition == "text_graph":
+        # Clean image + textual triples: tests the graph's information content
+        # with zero occlusion.
+        triples_path = Path(row["graph_path"].replace("_graph.json", "_graph_triples.txt"))
+        return build_vqa_prompt(
+            "visual_textual",
+            row["question"],
+            scene_graph=triples_path.read_text(encoding="utf-8").strip(),
+            profile=profile,
         )
     mode = "raw" if condition == "raw" else "visual"
     return build_vqa_prompt(mode, row["question"], profile=profile)
@@ -282,8 +297,12 @@ def main() -> int:
         if args.limit:
             template_rows = template_rows[: args.limit]
         preprocessing = args.data_root / "artifacts" / dataset / "preprocessing"
-        for condition, condition_spec in spec["conditions"].items():
-            if dataset == "refcocog" and condition in {"raw", "segmented"}:
+        extra = [v.strip() for v in args.extra_conditions.split(",") if v.strip()]
+        all_conditions = list(spec["conditions"].items()) + [
+            (name, {"render_variant": None}) for name in extra
+        ]
+        for condition, condition_spec in all_conditions:
+            if dataset == "refcocog" and condition in {"raw", "segmented", "text_graph"}:
                 continue
             variant = condition_spec["render_variant"]
             rows = [dict(row) for row in template_rows]

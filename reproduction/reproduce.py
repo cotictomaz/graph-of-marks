@@ -152,6 +152,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Forward a row limit to inference (pilot runs against partial artifacts).",
     )
+    parser.add_argument(
+        "--extra-conditions",
+        default="",
+        help="Forward extra inference conditions (e.g. text_graph).",
+    )
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -613,6 +618,8 @@ def inference(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
             command.extend(["--setting", args.setting])
         if args.limit:
             command.extend(["--limit", str(args.limit)])
+        if args.extra_conditions:
+            command.extend(["--extra-conditions", args.extra_conditions])
         if args.resume:
             command.append("--resume")
         run(command, dry_run=args.dry_run)

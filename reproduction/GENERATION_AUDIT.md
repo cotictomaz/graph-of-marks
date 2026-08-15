@@ -131,7 +131,7 @@ som_numeric +0.70). The off-grid single setting used in the main runs is not a c
 | gom_text_labeled | 70.76 | 71.23 | +0.47 |
 | gom_numeric_labeled | 68.75 | 69.18 | +0.43 |
 
-## 8. Verdict — ranked causes of the residual deficits
+## 8. Verdict after the corrected run — ranked causes of the residual deficits
 
 1. **LlamaV −32..−40: protocol artifact** (37–54% answer-less plan statements). Not a
    visual result.
@@ -145,3 +145,67 @@ The implication for the method: with `fill_segmentation` enabled (locked in the 
 profile), marks and VQA evidence are in direct conflict. The repo's own non-paper default
 (`preprocessor.py`: "Outline-only preserves image evidence for VQA") is the built-in fix;
 a paper-faithful reproduction cannot use it.
+
+## 9. Best-config run (`data_v3`, 2026-08-15): every fix applied
+
+Configuration chosen by evidence and a 120-image pilot: `paper_aaai26_outline` render
+profile (outline beat a true α=0.10 fill in all six marked conditions) + `direct_concise`
+prompt (final-answer-only on every condition) + filter v2 (appearance ∪ subjective).
+Outcomes:
+
+- **LlamaV's protocol artifact is cured**: plan-only generations fell from 37–54% to ≤0.1%,
+  and its marked deficit collapsed from −32..−40 to −4.4..−6.2. It was never a visual
+  result.
+- **Gemma's gains were prompt-format effects**: with raw receiving the same direct-answer
+  instruction, its raw scores jumped (VQAv1 60.5 → 68.0) and the marked advantage fell to
+  −1.6..+1.2 ≈ parity. Bidirectionally, GoM rescues ≈ as many instances as it breaks for
+  Gemma (e.g. VQAv1 70 vs 63).
+- **Qwen/LlamaV keep a 2–4× hurt/help instance ratio** (Qwen VQAv1: 61 broken vs 14
+  rescued kept-questions) even with outline marks.
+
+Three-run convergence (Δ best marked − raw, appearance∪subjective filter applied uniformly):
+
+| model | recorded | corrected | best-config |
+|---|---|---|---|
+| gemma3_4b (GQA/V1/V2) | +2.9/+3.9/+2.8 | +3.2/+6.2/+4.7 | −0.2/+1.2/+0.8 |
+| qwen25_vl_7b | −8.6/−12.5/−12.6 | −7.1/−8.3/−9.1 | −2.6/−4.9/−4.5 |
+| llamav_o1_11b | −35.2/−35.8/−36.0 | −33.6/−33.4/−33.6 | −3.4/−6.0/−7.1 |
+
+**Residual mechanisms, from the outline-render flip images**: (a) contour clutter from
+low-quality background masks — in `COCO_train2014_000000000081` the *sky* mask's sprawling
+green outline makes the model see extra colors; (b) contours crossing the fine details the
+question asks about — in `COCO_train2014_000000262204` the elephant's outline runs through
+the tusk region and the count drops 2→1. (a) suggests one honest remaining knob
+(drop stuff-classes / huge-area masks); (b) is intrinsic to drawing on pixels.
+
+## 10. The zero-occlusion test and the closing assessment
+
+`text_graph` condition (new `--extra-conditions text_graph`): the untouched original image
+plus the textual triples in the prompt — the graph's information with zero pixels changed.
+
+| model | GQA | VQAv1 | VQAv2 | (lenient) |
+|---|---:|---:|---:|---|
+| gemma3_4b | −1.00 | +0.53 | −0.23 | ≈0 everywhere |
+| qwen25_vl_7b | −5.80 | −4.36 | −3.72 | −3.5..−5.3 |
+| llamav_o1_11b | −7.50 | −13.21 | −13.61 | −4.1..−5.5 |
+
+**Even with no occlusion at all, the graph's content does not help** — for the stronger
+models it actively hurts: the detector-derived triples are coarser and noisier than what
+the models extract from clean pixels, and the "use the graph" instruction makes them defer
+to the worse source.
+
+Evidence stack against any recoverable across-model gain, each item independent:
+1. Marked-vs-raw negative under every render/prompt configuration tested (five runs).
+2. Zero-occlusion textual graph ≈ neutral (Gemma) or harmful (Qwen/LlamaV).
+3. No principled subset wins: spatial/relational questions — the paper's core claim — are
+   the WORST category for every model (Qwen −4.8..−12.6); graph-covered instances are
+   hurt more, not less.
+4. Oracle ceilings (outcome-based deletion of every failing instance — diagnostic only,
+   not a valid protocol): Qwen still lands at −0.9..+3.8; only Gemma's ceiling (+7.5..+9.5)
+   can reach paper-sized gains, and only by construction.
+5. The paper's own released VQAv2 artifacts score raw 63.25 vs best-GoM 53.77 under
+   standard VQA scoring.
+
+Where marks genuinely, reproducibly help: **RefCOCOg-style grounding** (raw 0 → 34–45;
+best-config improved all three models further), and Gemma-sized models reach parity on
+VQA. That is the defensible claim this pipeline supports.

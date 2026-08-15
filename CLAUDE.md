@@ -207,8 +207,21 @@ are gone. (3) Gemma's gains are mostly answer-format calibration — lenient sco
 the GQA gain (+1.99→−0.92) and most of VQAv2 (+1.51); only VQAv1 keeps ~+5 genuine.
 (4) Truncation ruled out; the off-grid decode setting (0,0.2,0.9 ∉ published grid) shifts
 nothing (≤0.7, tested at 42/0.1/0.9 via the new `--setting` flag on
-`run_table2.py`/`reproduce.py`). Net: outline-only rendering (the non-paper default) is the
-obvious fix direction, but it is outside the locked paper profile.
+`run_table2.py`/`reproduce.py`).
+
+**Best-config run (data_v3, 2026-08-15) — the closing result.** Outline renders
+(`paper_aaai26_outline`, pilot-selected over α=0.10 fill) + `direct_concise` prompt +
+filter v2 (appearance ∪ subjective): all three models converge to Δ ∈ [−7.1, +1.2]
+(filtered) — LlamaV's plan-mode cured (37–54% → ≤0.1%), Gemma's gains exposed as format
+effects, Qwen at a 2–4× hurt/help flip ratio. The `text_graph` arm (clean image + triples,
+zero occlusion, `--extra-conditions text_graph`) is neutral for Gemma and harmful for
+Qwen/LlamaV — the graph's information content is below what the models extract from pixels.
+Spatial/relational questions are the WORST category for every model
+(`reproduction/find_winning_config.py`); graph-covered instances are hurt more, not less;
+oracle ceilings show Qwen cannot be made positive even by outcome-based instance deletion
+(−0.9..+3.8). The defensible claims: marks are indispensable for RefCOCOg grounding
+(0 → 34–45, improved further by outline renders), and Gemma-class models reach VQA parity.
+Full record: `reproduction/GENERATION_AUDIT.md` §9–10, `RESULTS.md` §Best-config.
 
 ## Known confounds in the Table 2 negative result
 

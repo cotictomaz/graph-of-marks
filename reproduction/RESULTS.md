@@ -182,6 +182,32 @@ overlay still costs more than the scene graph adds, even at declared opacity wit
 query-pruned marks and appearance questions removed. Reports:
 `data_v2/table2_report.supplementary_concise{,.appearance_filtered}.{json,md}`.
 
+## Best-config run (`data_v3`, 2026-08-15) and the closing verdict
+
+A third full run applied every fix the audit identified, as deliberate deviations from the
+paper profile: outline-only marks (`paper_aaai26_outline`, pilot-selected over a true
+α=0.10 fill), a final-answer-only prompt on every condition (`direct_concise`), and filter
+v2 (appearance ∪ subjective). It also added the zero-occlusion `text_graph` arm (clean
+image + textual triples). Full numbers: `data_v3/table2_report.direct_concise*.{json,md}`
+and `GENERATION_AUDIT.md` §9–10. Summary (Δ best marked − raw, filtered uniformly):
+
+| model | recorded | corrected | best-config | text_graph (zero occlusion) |
+|---|---|---|---|---|
+| gemma3_4b | +2.9/+3.9/+2.8 | +3.2/+6.2/+4.7 | −0.2/+1.2/+0.8 | −1.0/+0.5/−0.2 |
+| qwen25_vl_7b | −8.6/−12.5/−12.6 | −7.1/−8.3/−9.1 | −2.6/−4.9/−4.5 | −5.8/−4.4/−3.7 |
+| llamav_o1_11b | −35.2/−35.8/−36.0 | −33.6/−33.4/−33.6 | −3.4/−6.0/−7.1 | −7.5/−13.2/−13.6 |
+
+Every fix moved every model monotonically toward zero; none crossed it. LlamaV's collapse
+was a chat-protocol artifact (plan-only 37–54% → ≤0.1% under direct_concise); Gemma's
+apparent gains were answer-format effects that vanish when raw gets the same instruction;
+Qwen keeps a 2–4× hurt/help flip ratio under every configuration; and the textual graph
+with zero occlusion is neutral-to-harmful — the triples carry less information than the
+models extract from clean pixels. Spatial/relational questions, the paper's core claim, are
+the worst category for all three models. Marks remain genuinely indispensable for RefCOCOg
+grounding. See `GENERATION_AUDIT.md` §10 for the full five-point evidence stack, including
+the oracle-ceiling analysis showing the result cannot be inverted even by outcome-based
+instance deletion.
+
 **Read `GENERATION_AUDIT.md` before quoting any of these numbers.** The generation-level
 audit (2026-08-15) establishes: LlamaV's marked cells are 37–54% answer-less "plan"
 statements (a chat-protocol artifact, not a visual result); Qwen's residual deficit is

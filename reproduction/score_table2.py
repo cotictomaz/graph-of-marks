@@ -253,6 +253,11 @@ def main() -> int:
     parser.add_argument(
         "--question-filter", choices=("none", "appearance"), default="none"
     )
+    parser.add_argument(
+        "--extra-conditions",
+        default="",
+        help="Comma-separated extra conditions beyond paper_spec (e.g. text_graph).",
+    )
     args = parser.parse_args()
     spec = load_yaml(PAPER_SPEC)
     datasets = [value.strip() for value in args.datasets.split(",") if value.strip()]
@@ -277,8 +282,9 @@ def main() -> int:
             keep = None
             if args.question_filter == "appearance" and dataset != "refcocog":
                 keep = keep_ids(rows)
-            for condition in spec["conditions"]:
-                if dataset == "refcocog" and condition in {"raw", "segmented"}:
+            extra = [v.strip() for v in args.extra_conditions.split(",") if v.strip()]
+            for condition in list(spec["conditions"]) + extra:
+                if dataset == "refcocog" and condition in {"raw", "segmented", "text_graph"}:
                     continue
                 run_scores = []
                 released_code_run_scores = []
