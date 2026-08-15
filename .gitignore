@@ -19,7 +19,7 @@ __pycache__/
 
 # Published reproduction inputs and schemas. Benchmark outputs remain ignored.
 !reproduction/manifests/*_author.json
-reproduction/data/
+reproduction/data*/
 
 
 **/data/
