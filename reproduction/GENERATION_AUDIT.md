@@ -214,6 +214,35 @@ Visual case files: `FLIP_EXAMPLES.md` (segmented condition) and
 `FLIP_EXAMPLES_FULL_GOM.md` (full GoM — IDs + arrows + relation labels — on
 spatial/relational questions, with the condition ladder and break/rescue counts).
 
+## 12. Clutter: quantified, causally tested, and bounded (2026-08-15)
+
+Visual inspection identified overlapping tags/arrows/labels as the failure mode of the
+full-GoM conditions. Both halves tested:
+
+**Dose-response (existing data_v3 predictions, `find_winning_config.py --clutter`).**
+Binning kept questions by the recorded `rendered_edge_count`, Qwen's Δ(gom_text_labeled −
+raw) degrades from −2.5..−4.2 at zero rendered relations to **−12..−15 at ≥10** (Gemma
+VQAv2: −3.0 → −9.4..−10.1). Clutter is the dominant driver of the *labeled* conditions'
+extra damage. At high edge counts the loss is largely shared with the IDs-only condition —
+total annotation mass, not arrows specifically.
+
+**Intervention (`paper_aaai26_declutter`: outline + mask-quality/stuff filter +
+question-only relation rendering + per-head relation cap).** The worst case (`4928`,
+~15 stacked labels) reduces to 3 objects / 3 arrows / 3 labels, fully readable
+(render pair in `flip_examples_full_gom/`). 120-image GQA pilot: labeled conditions
++2.5/+3.3. Full 1,000-image GQA run, all three models: labeled conditions improve
+consistently but modestly (+0.4..+1.8; pilot optimism was sample noise), and
+Δ(best marked − raw) barely moves — Gemma −1.6 → −0.5, LlamaV −4.4 → −4.0,
+**Qwen −4.9 → −4.9** — because every model's best marked condition is `segmented`,
+which carries almost no annotations and was never clutter-limited. Note: under the paper
+relation policy `max_relations_per_object` caps per relation *head*, so several edges per
+object survive; deeper decluttering would need render-path changes.
+
+**Bound.** Clutter explains why full GoM is the worst-performing mark family and its
+removal recovers ~1 point at scale; it does not explain the residual −4..−5 gap between
+the most minimal mark and raw, which remains the §8/§10 evidence-destruction and
+information-content story.
+
 ## 11. Exhaustion: subsample-rule search and final config candidates (2026-08-15)
 
 Final instruction was to find the subsample and configuration under which the whole GoM

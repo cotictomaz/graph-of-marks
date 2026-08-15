@@ -232,3 +232,13 @@ hq`, weight hash verified at run time). Imprecise boundaries visible in these re
 the pipeline's genuine behavior, not an evaluation artifact. Detection is the declared
 OWLv2 + YOLOv8 + Detectron2 ensemble; objects missing from graphs (cases 1 and 3) are
 detector misses that no render setting can repair.
+## The same cluttered case after the declutter profile (`paper_aaai26_declutter`)
+
+Case 1 (`4928`) re-rendered with the stuff-mask filter, question-only relations, and
+per-head relation caps — from ~15 stacked labels to 3 objects / 3 arrows / 3 labels.
+Full-scale effect of decluttering: labeled conditions +0.4..+1.8, best-marked-vs-raw gap
+essentially unchanged (see GENERATION_AUDIT.md §12).
+
+| paper-policy render (cluttered) | declutter profile |
+|---|---|
+| ![clutter](flip_examples_full_gom/01_4928_full_gom.jpg) | ![decluttered](flip_examples_full_gom/4928_decluttered.jpg) |
