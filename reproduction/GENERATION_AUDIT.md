@@ -210,6 +210,10 @@ Where marks genuinely, reproducibly help: **RefCOCOg-style grounding** (raw 0 �
 best-config improved all three models further), and Gemma-sized models reach parity on
 VQA. That is the defensible claim this pipeline supports.
 
+Visual case files: `FLIP_EXAMPLES.md` (segmented condition) and
+`FLIP_EXAMPLES_FULL_GOM.md` (full GoM — IDs + arrows + relation labels — on
+spatial/relational questions, with the condition ladder and break/rescue counts).
+
 ## 11. Exhaustion: subsample-rule search and final config candidates (2026-08-15)
 
 Final instruction was to find the subsample and configuration under which the whole GoM
