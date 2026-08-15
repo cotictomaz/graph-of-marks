@@ -250,14 +250,67 @@ def rule_search(args) -> None:
         print(f"- {m}: {len(rescues)}/{total} kept instances are rescues -> {path}")
 
 
+def clutter_analysis(args) -> None:
+    """Damage as a function of rendered annotation density (dose-response)."""
+    from question_filter import appearance_reason
+
+    EDGE_BINS = ((0, 0), (1, 2), (3, 5), (6, 9), (10, 10**6))
+    NODE_BINS = ((0, 2), (3, 4), (5, 6), (7, 10**6))
+
+    def bin_label(bins, v):
+        for lo, hi in bins:
+            if lo <= v <= hi:
+                return f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 10**6 else f">={lo}")
+        return "?"
+
+    for m in MODELS:
+        print(f"\n## {m}: delta vs raw by rendered relation-label count "
+              f"(gom_text_labeled; kept questions)\n")
+        print("| dataset | edge bin | n | Δ(labeled−raw) | Δ(labeled−gom_text) |")
+        print("|---|---|---:|---:|---:|")
+        for ds in DATASETS:
+            rows = first_row_per_image(read_jsonl(args.data_root / "prepared" / ds / "eval.jsonl"))
+            preds = {}
+            arts = {}
+            for c in ("raw", "gom_text", "gom_text_labeled"):
+                recs = read_jsonl(args.data_root / "predictions" / args.prompt_profile
+                                  / m / ds / c / "seed0_temp0.2_top_p0.90.jsonl")
+                preds[c] = {r["question_id"]: r["prediction"] for r in recs}
+                arts[c] = {r["question_id"]: r.get("artifact", {}) for r in recs}
+            buckets = {}
+            for row in rows:
+                answers = row.get("answers") or ([row["answer"]] if row.get("answer") else [])
+                if appearance_reason(row["question"], answers) is not None:
+                    continue
+                q = row["question_id"]
+                edges = arts["gom_text_labeled"][q].get("rendered_edge_count") or 0
+                key = bin_label(EDGE_BINS, edges)
+                b = buckets.setdefault(key, {"n": 0, "raw": 0.0, "gt": 0.0, "gtl": 0.0})
+                b["n"] += 1
+                b["raw"] += score(preds["raw"][q], row, ds)
+                b["gt"] += score(preds["gom_text"][q], row, ds)
+                b["gtl"] += score(preds["gom_text_labeled"][q], row, ds)
+            for key in ("0", "1-2", "3-5", "6-9", ">=10"):
+                b = buckets.get(key)
+                if not b or b["n"] < 25:
+                    continue
+                d_raw = 100.0 * (b["gtl"] - b["raw"]) / b["n"]
+                d_gt = 100.0 * (b["gtl"] - b["gt"]) / b["n"]
+                print(f"| {ds} | {key} | {b['n']} | {d_raw:+.2f} | {d_gt:+.2f} |")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", type=Path, default=Path("reproduction/data_v3"))
     ap.add_argument("--prompt-profile", default="direct_concise")
     ap.add_argument("--rule-search", action="store_true")
+    ap.add_argument("--clutter", action="store_true")
     args = ap.parse_args()
     if args.rule_search:
         rule_search(args)
+        return 0
+    if args.clutter:
+        clutter_analysis(args)
         return 0
 
     all_inst = {}

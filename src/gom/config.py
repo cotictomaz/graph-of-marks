@@ -448,6 +448,14 @@ _PAPER_AAAI26_OUTLINE_THIN_PROFILE = {
     "profile": "paper_aaai26_outline_thin",
     "bbox_linewidth": 0.8,
 }
+_PAPER_AAAI26_DECLUTTER_PROFILE = {
+    **_PAPER_AAAI26_OUTLINE_PROFILE,
+    "profile": "paper_aaai26_declutter",
+    "enable_mask_quality_filter": True,
+    "render_question_relations_only": True,
+    "max_relations_per_object": 1,
+    "filter_redundant_relations": True,
+}
 
 _PROFILE_TABLES = {
     "paper_legacy": _LEGACY_PROFILE,
@@ -456,6 +464,7 @@ _PROFILE_TABLES = {
     "paper_aaai26_lowfill": _PAPER_AAAI26_LOWFILL_PROFILE,
     "paper_aaai26_outline_clean": _PAPER_AAAI26_OUTLINE_CLEAN_PROFILE,
     "paper_aaai26_outline_thin": _PAPER_AAAI26_OUTLINE_THIN_PROFILE,
+    "paper_aaai26_declutter": _PAPER_AAAI26_DECLUTTER_PROFILE,
 }
 
 

@@ -82,3 +82,13 @@ def test_outline_clean_and_thin_variants():
     assert not thin.fill_segmentation and thin.bbox_linewidth == 0.8
     validate_paper_config(clean)
     validate_paper_config(thin)
+
+
+def test_declutter_variant_minimizes_annotations():
+    cfg = default_config("paper_aaai26_declutter")
+    assert not cfg.fill_segmentation
+    assert cfg.enable_mask_quality_filter
+    assert cfg.render_question_relations_only
+    assert cfg.max_relations_per_object == 1
+    assert cfg.filter_redundant_relations
+    validate_paper_config(cfg)
