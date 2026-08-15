@@ -208,6 +208,11 @@ grounding. See `GENERATION_AUDIT.md` §10 for the full five-point evidence stack
 the oracle-ceiling analysis showing the result cannot be inverted even by outcome-based
 instance deletion.
 
+The subsequent subsample-rule search (230 a-priori rules, derive-on-VQAv1 /
+verify-on-GQA+VQAv2: zero passed even on train) and the final config pilots
+(`outline_clean` reached −0.92, the best marked result recorded, still below raw) closed
+the investigation — see `GENERATION_AUDIT.md` §11 for the exhaustion record.
+
 **Read `GENERATION_AUDIT.md` before quoting any of these numbers.** The generation-level
 audit (2026-08-15) establishes: LlamaV's marked cells are 37–54% answer-less "plan"
 statements (a chat-protocol artifact, not a visual result); Qwen's residual deficit is

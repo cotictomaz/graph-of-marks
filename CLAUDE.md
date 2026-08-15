@@ -222,6 +222,12 @@ oracle ceilings show Qwen cannot be made positive even by outcome-based instance
 (−0.9..+3.8). The defensible claims: marks are indispensable for RefCOCOg grounding
 (0 → 34–45, improved further by outline renders), and Gemma-class models reach VQA parity.
 Full record: `reproduction/GENERATION_AUDIT.md` §9–10, `RESULTS.md` §Best-config.
+**The search is closed (§11):** 230 a-priori subsample rules (derive VQAv1 → verify
+GQA+VQAv2) produced zero candidates even on train; final config pilots
+(`paper_aaai26_outline_clean` — stuff-mask filter on, best marked −0.92 vs raw;
+`_outline_thin`) stayed below raw. Do not reopen without new data or models; any
+outcome-selected subsample "wins" are in `data_v3/showcase_rescues.*.json` and are
+diagnostic only.
 
 ## Known confounds in the Table 2 negative result
 

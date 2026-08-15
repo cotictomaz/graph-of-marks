@@ -32,6 +32,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=[
             "quality_vqa", "paper_legacy", "paper_aaai26",
             "paper_aaai26_outline", "paper_aaai26_lowfill",
+            "paper_aaai26_outline_clean", "paper_aaai26_outline_thin",
         ],
         default="quality_vqa",
         help="Quality-first defaults or historical paper rendering/filtering",

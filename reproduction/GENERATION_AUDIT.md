@@ -209,3 +209,42 @@ Evidence stack against any recoverable across-model gain, each item independent:
 Where marks genuinely, reproducibly help: **RefCOCOg-style grounding** (raw 0 → 34–45;
 best-config improved all three models further), and Gemma-sized models reach parity on
 VQA. That is the defensible claim this pipeline supports.
+
+## 11. Exhaustion: subsample-rule search and final config candidates (2026-08-15)
+
+Final instruction was to find the subsample and configuration under which the whole GoM
+pipeline improves as in the paper, and not stop until verified. Verification was defined
+before running: an a-priori selection rule (question/image/graph features only) derived on
+VQAv1 must transfer with Δ>0 for all three models to held-out GQA and VQAv2.
+
+**Subsample axis — exhausted negative.** `find_winning_config.py --rule-search` enumerated
+230 rules (all single-feature buckets and all cross-feature 2-way conjunctions over:
+question type, relational form, question length, graph nodes/edges, queried-class
+multiplicity, coverage, tiny-objects). **Zero rules met the criterion even on the training
+dataset**, so held-out verification never engaged. The outcome-selected "GoM wins" sets
+(exported to `data_v3/showcase_rescues.*.json`, diagnostic only) cover 34/2242 kept
+instances for Qwen (1.5%), 68 for LlamaV, 164 for Gemma — too small and feature-incoherent
+to support any selection rule.
+
+**Config axis — exhausted at parity.** Two final evidence-backed variants piloted (120
+VQAv2 images, Qwen, direct_concise, vs the plain-outline baseline):
+
+| pilot config | best marked | Δ vs raw (84.58) |
+|---|---:|---:|
+| outline (baseline) | 82.58 | −2.00 |
+| **outline_clean** (mask-quality filter on → stuff masks dropped; sky-contour case fixed, verified visually) | **83.67** | **−0.92** |
+| outline_thin (contours 1.8 → 0.8) | 82.50 | −2.08 |
+
+`outline_clean` is the best marked-condition result recorded anywhere in this
+investigation — a single clean outline on query-relevant foreground objects — and it is
+still below raw (inside noise of parity at n=120; promotion gate of +1.5 over baseline not
+met; no full run spent).
+
+**Closing statement.** Across three full runs, six render configurations, four prompt
+profiles, decode variations, textual-only delivery, 230 subsample rules, and
+outcome-selected ceilings, the verified finding is: **the GoM pipeline's across-model VQA
+improvements reported in the paper do not exist in this data under any configuration or
+defensible instance selection.** The monotone trend of the entire investigation — every
+fix moved marked conditions toward raw, never past it — is itself the strongest evidence:
+the best a mark can do on VQA is not be noticed. GoM's real, verified contributions are
+referring-expression grounding (raw 0 → 34–45) and VQA parity for small models.

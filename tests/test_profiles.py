@@ -73,3 +73,12 @@ def test_outline_and_lowfill_variants_differ_from_paper_only_in_fill():
     # variants must not trip the paper lock
     validate_paper_config(outline)
     validate_paper_config(lowfill)
+
+
+def test_outline_clean_and_thin_variants():
+    clean = default_config("paper_aaai26_outline_clean")
+    thin = default_config("paper_aaai26_outline_thin")
+    assert not clean.fill_segmentation and clean.enable_mask_quality_filter
+    assert not thin.fill_segmentation and thin.bbox_linewidth == 0.8
+    validate_paper_config(clean)
+    validate_paper_config(thin)

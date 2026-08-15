@@ -438,12 +438,24 @@ _PAPER_AAAI26_LOWFILL_PROFILE = {
     "profile": "paper_aaai26_lowfill",
     "seg_fill_alpha": 0.10,
 }
+_PAPER_AAAI26_OUTLINE_CLEAN_PROFILE = {
+    **_PAPER_AAAI26_OUTLINE_PROFILE,
+    "profile": "paper_aaai26_outline_clean",
+    "enable_mask_quality_filter": True,  # drops background/stuff masks (sky, grass, ...)
+}
+_PAPER_AAAI26_OUTLINE_THIN_PROFILE = {
+    **_PAPER_AAAI26_OUTLINE_PROFILE,
+    "profile": "paper_aaai26_outline_thin",
+    "bbox_linewidth": 0.8,
+}
 
 _PROFILE_TABLES = {
     "paper_legacy": _LEGACY_PROFILE,
     "paper_aaai26": _PAPER_AAAI26_PROFILE,
     "paper_aaai26_outline": _PAPER_AAAI26_OUTLINE_PROFILE,
     "paper_aaai26_lowfill": _PAPER_AAAI26_LOWFILL_PROFILE,
+    "paper_aaai26_outline_clean": _PAPER_AAAI26_OUTLINE_CLEAN_PROFILE,
+    "paper_aaai26_outline_thin": _PAPER_AAAI26_OUTLINE_THIN_PROFILE,
 }
 
 

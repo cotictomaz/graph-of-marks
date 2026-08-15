@@ -103,11 +103,162 @@ def best_marked(instances):
     return max(((c, acc(instances, c)) for c in MARKED), key=lambda x: x[1])
 
 
+def load_features(root, profile, ds):
+    """Model-independent a-priori features + per-model scores for each kept instance."""
+    from question_filter import appearance_reason
+
+    rows = first_row_per_image(read_jsonl(root / "prepared" / ds / "eval.jsonl"))
+    gdir = root / "artifacts" / ds / "preprocessing"
+    preds = {
+        m: {
+            c: {
+                r["question_id"]: r["prediction"]
+                for r in read_jsonl(
+                    root / "predictions" / profile / m / ds / c / "seed0_temp0.2_top_p0.90.jsonl"
+                )
+            }
+            for c in ("raw", "segmented")
+        }
+        for m in MODELS
+    }
+    out = []
+    for row in rows:
+        answers = row.get("answers") or ([row["answer"]] if row.get("answer") else [])
+        if appearance_reason(row["question"], answers) is not None:
+            continue
+        q = row["question_id"]
+        intent = QI.parse_question_intent(row["question"])
+        gpath = gdir / f"{Path(row['image_path']).stem}_q1_graph.json"
+        graph = json.loads(gpath.read_text()) if gpath.is_file() else {"nodes": [], "links": []}
+        labels = [QI.canonical_object_label(_SUFFIX_RE.sub("", n["label"])) for n in graph.get("nodes", [])]
+        areas = [n.get("area_norm", 0.0) for n in graph.get("nodes", [])]
+        multiplicity = max(
+            (labels.count(t) for t in intent.object_terms), default=0
+        )
+        feats = {
+            "qtype": intent.question_type,
+            "relational": bool(intent.relation_terms) or intent.question_type == "spatial",
+            "qlen": len(row["question"].split()),
+            "n_nodes": len(labels),
+            "n_edges": len(graph.get("links", [])),
+            "multiplicity": multiplicity,
+            "covered": bool(intent.object_terms) and all(t in labels for t in intent.object_terms),
+            "tiny_objects": bool(areas) and min(areas) < 0.02,
+        }
+        scores = {
+            m: {c: score(preds[m][c][q], row, ds) for c in ("raw", "segmented")}
+            for m in MODELS
+        }
+        out.append({"qid": q, "image": Path(row["image_path"]).stem,
+                    "question": row["question"], "feats": feats, "scores": scores})
+    return out
+
+
+BUCKETS = {
+    "qtype": [("qtype=" + v, lambda f, v=v: f["qtype"] == v)
+              for v in ("count", "yes_no", "spatial", "identity", "open")],
+    "relational": [("relational", lambda f: f["relational"]),
+                   ("non-relational", lambda f: not f["relational"])],
+    "qlen": [("qlen<=5", lambda f: f["qlen"] <= 5),
+             ("qlen6-9", lambda f: 6 <= f["qlen"] <= 9),
+             ("qlen>=10", lambda f: f["qlen"] >= 10)],
+    "n_nodes": [("nodes<=3", lambda f: f["n_nodes"] <= 3),
+                ("nodes4-6", lambda f: 4 <= f["n_nodes"] <= 6),
+                ("nodes>=7", lambda f: f["n_nodes"] >= 7)],
+    "n_edges": [("edges<=6", lambda f: f["n_edges"] <= 6),
+                ("edges>=7", lambda f: f["n_edges"] >= 7)],
+    "multiplicity": [("mult=0", lambda f: f["multiplicity"] == 0),
+                     ("mult=1", lambda f: f["multiplicity"] == 1),
+                     ("mult>=2", lambda f: f["multiplicity"] >= 2)],
+    "covered": [("covered", lambda f: f["covered"]),
+                ("uncovered", lambda f: not f["covered"])],
+    "tiny": [("tiny-objects", lambda f: f["tiny_objects"]),
+             ("no-tiny-objects", lambda f: not f["tiny_objects"])],
+}
+
+
+def rule_deltas(instances, pred):
+    sub = [i for i in instances if pred(i["feats"])]
+    if len(sub) < 50:
+        return None
+    out = {"n": len(sub)}
+    for m in MODELS:
+        raw = sum(i["scores"][m]["raw"] for i in sub) / len(sub)
+        seg = sum(i["scores"][m]["segmented"] for i in sub) / len(sub)
+        out[m] = 100.0 * (seg - raw)
+    return out
+
+
+def rule_search(args) -> None:
+    data = {ds: load_features(args.data_root, args.prompt_profile, ds) for ds in DATASETS}
+
+    rules = []
+    singles = [(name, fn, group) for group, items in BUCKETS.items() for name, fn in items]
+    for name, fn, _ in singles:
+        rules.append((name, fn))
+    for i, (n1, f1, g1) in enumerate(singles):
+        for n2, f2, g2 in singles[i + 1:]:
+            if g1 == g2:
+                continue
+            rules.append((f"{n1} & {n2}", lambda f, a=f1, b=f2: a(f) and b(f)))
+
+    print(f"## Rule search: derive on VQAv1 (n_kept={len(data['vqav1'])}), "
+          f"verify on GQA+VQAv2 (kept {len(data['gqa'])}/{len(data['vqav2'])})")
+    print(f"rules enumerated: {len(rules)}; criterion: Delta(segmented-raw)>0 for ALL "
+          f"three models, n>=50, on train AND both held-out datasets\n")
+    candidates = []
+    for name, fn in rules:
+        train = rule_deltas(data["vqav1"], fn)
+        if train is None or any(train[m] <= 0 for m in MODELS):
+            continue
+        candidates.append((name, fn, train))
+    print(f"| rule | n(v1) | " + " | ".join(m.split('_')[0] for m in MODELS) +
+          " | GQA transfer | VQAv2 transfer | VERDICT |")
+    print("|---|---:|" + "---:|" * 3 + "---|---|---|")
+    verified = []
+    for name, fn, train in sorted(candidates, key=lambda x: -min(x[2][m] for m in MODELS)):
+        cols = "".join(f" {train[m]:+.2f} |" for m in MODELS)
+        transfers = {}
+        for ds in ("gqa", "vqav2"):
+            d = rule_deltas(data[ds], fn)
+            if d is None:
+                transfers[ds] = "n<50"
+            else:
+                ok = all(d[m] > 0 for m in MODELS)
+                transfers[ds] = ("PASS " if ok else "fail ") + \
+                    "/".join(f"{d[m]:+.1f}" for m in MODELS) + f" (n={d['n']})"
+        ok_all = all(t.startswith("PASS") for t in transfers.values())
+        if ok_all:
+            verified.append(name)
+        print(f"| {name} | {train['n']} |{cols} {transfers['gqa']} | {transfers['vqav2']} | "
+              f"{'**VERIFIED**' if ok_all else 'not verified'} |")
+    if not candidates:
+        print("| (no rule met the train criterion for all three models) | | | | | | |")
+    print(f"\ntrain-passing candidates: {len(candidates)}; VERIFIED on both held-out "
+          f"datasets: {len(verified)} {verified}")
+
+    print("\n## Outcome-selected showcase (DIAGNOSTIC ONLY — selected on results, "
+          "verifies nothing)")
+    for m in MODELS:
+        rescues = [i for ds in DATASETS for i in data[ds]
+                   if i["scores"][m]["raw"] <= 0.1 and i["scores"][m]["segmented"] >= 0.9]
+        path = args.data_root / f"showcase_rescues.{m}.json"
+        path.write_text(json.dumps(
+            [{"image": i["image"], "question": i["question"]} for i in rescues],
+            indent=2, ensure_ascii=False))
+        total = sum(len(data[ds]) for ds in DATASETS)
+        print(f"- {m}: {len(rescues)}/{total} kept instances are rescues -> {path}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", type=Path, default=Path("reproduction/data_v3"))
     ap.add_argument("--prompt-profile", default="direct_concise")
+    ap.add_argument("--rule-search", action="store_true")
     args = ap.parse_args()
+    if args.rule_search:
+        rule_search(args)
+        return 0
 
     all_inst = {}
     for m in MODELS:
