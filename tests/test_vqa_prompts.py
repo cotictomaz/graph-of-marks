@@ -56,3 +56,10 @@ def test_released_artifact_prompt_is_separate_profile():
         "visual", "What color?", profile="released_artifact_bare"
     )
     assert user == "Answer with only one word.\nQuestion: What color?\nAnswer:"
+
+
+def test_direct_concise_forbids_reasoning_on_every_condition():
+    for mode in ("raw", "visual"):
+        _, user = build_vqa_prompt(mode, "How many dogs?", profile="direct_concise")
+        assert "Do not describe your approach" in user
+        assert "single word or phrase" in user

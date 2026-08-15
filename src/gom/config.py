@@ -426,6 +426,26 @@ PAPER_AAAI26_LOCKED_FIELDS = {
     if key not in {"render_variants", "profile"}
 }
 
+# Best-config variants: identical to the paper profile except for the mask fill.
+# Not locked — they are deliberate deviations for the post-audit runs.
+_PAPER_AAAI26_OUTLINE_PROFILE = {
+    **_PAPER_AAAI26_PROFILE,
+    "profile": "paper_aaai26_outline",
+    "fill_segmentation": False,
+}
+_PAPER_AAAI26_LOWFILL_PROFILE = {
+    **_PAPER_AAAI26_PROFILE,
+    "profile": "paper_aaai26_lowfill",
+    "seg_fill_alpha": 0.10,
+}
+
+_PROFILE_TABLES = {
+    "paper_legacy": _LEGACY_PROFILE,
+    "paper_aaai26": _PAPER_AAAI26_PROFILE,
+    "paper_aaai26_outline": _PAPER_AAAI26_OUTLINE_PROFILE,
+    "paper_aaai26_lowfill": _PAPER_AAAI26_LOWFILL_PROFILE,
+}
+
 
 def validate_paper_config(cfg: PreprocessorConfig) -> None:
     """Reject silent drift in the immutable paper-declared profile."""
@@ -448,21 +468,16 @@ def default_config(profile: str = "quality_vqa", **overrides: Any) -> Preprocess
     """
     Create a PreprocessorConfig with sensible defaults and optional overrides.
     """
-    if profile not in {"quality_vqa", "paper_legacy", "paper_aaai26"}:
-        raise ValueError(
-            "profile must be 'quality_vqa', 'paper_legacy', or 'paper_aaai26'"
-        )
+    valid = {"quality_vqa", *_PROFILE_TABLES}
+    if profile not in valid:
+        raise ValueError(f"profile must be one of {sorted(valid)}")
     cfg = PreprocessorConfig()
     cfg.profile = profile
-    if profile == "paper_legacy":
+    table = _PROFILE_TABLES.get(profile)
+    if table:
         import copy
 
-        for key, value in _LEGACY_PROFILE.items():
-            setattr(cfg, key, copy.deepcopy(value))
-    elif profile == "paper_aaai26":
-        import copy
-
-        for key, value in _PAPER_AAAI26_PROFILE.items():
+        for key, value in table.items():
             setattr(cfg, key, copy.deepcopy(value))
     for k, v in overrides.items():
         setattr(cfg, k, v)

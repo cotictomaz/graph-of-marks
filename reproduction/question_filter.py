@@ -4,8 +4,9 @@
 Implements the filter recorded in CLAUDE.md "Known confounds": drop an image's
 canonical question when it asks about surface appearance that the mark overlay
 destroys — color, material/texture/pattern, text-in-image — or when a color
-word appears in the question or in >=50% of the gold answers. RefCOCOg is never
-filtered (its "question" is a synthetic target-description string).
+word appears in the question or in >=50% of the gold answers — plus subjective
+questions the image cannot answer ("Have you visited this zoo?"). RefCOCOg is
+never filtered (its "question" is a synthetic target-description string).
 
 Stdlib only; runs on the host like the rest of reproduction/.
 """
@@ -52,6 +53,11 @@ _TEXT_IN_IMAGE_RE = re.compile(
     r"spell(?:ed)?)\b"
 )
 _TOKEN_RE = re.compile(r"[a-z]+")
+_SUBJECTIVE_RE = re.compile(
+    r"\b(?:have|would) you\b|\bdo you (?!see\b)|\bcould (?:these|this|it) be\b|"
+    r"\b(?:does|do) .{0,30}\b(?:like|want|enjoy)\b|\bsame day\b|"
+    r"\bdo (?:you|they) think\b"
+)
 
 
 def _has_color_word(text: str) -> bool:
@@ -72,6 +78,8 @@ def appearance_reason(question: str, answers) -> str | None:
     answers = [a for a in (answers or []) if a]
     if answers and 2 * sum(_has_color_word(a) for a in answers) >= len(answers):
         return "color_word_in_answers"
+    if _SUBJECTIVE_RE.search(q):
+        return "subjective"
     return None
 
 

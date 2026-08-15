@@ -20,6 +20,7 @@ FASTTEXT=${GOM_FASTTEXT:-$DATA_ROOT/cc.en.300.kv}
 MODEL_CACHE=${GOM_MODEL_CACHE:-$HOME/.cache/gom-paper}
 MODELS="gemma3_4b qwen25_vl_7b llamav_o1_11b"
 PROFILES=${GOM_PROFILES:-"paper_declared supplementary_concise"}
+RENDER_PROFILE=${GOM_RENDER_PROFILE:-paper_aaai26}
 DATASETS=gqa,vqav1,vqav2,refcocog
 DATASET_ARCHIVE=${GOM_DATASET_ARCHIVE:-$ROOT/data_paper/gom_datasets.zip}
 # Free VRAM each model needs before it is launched; see the inference section.
@@ -107,6 +108,7 @@ reproduce() {
         --fasttext "$FASTTEXT" \
         --model-cache "$MODEL_CACHE" \
         --artifact-granularity image \
+        --render-profile "$RENDER_PROFILE" \
         --no-build --resume "$@"
 }
 

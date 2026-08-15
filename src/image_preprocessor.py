@@ -29,7 +29,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--profile",
-        choices=["quality_vqa", "paper_legacy", "paper_aaai26"],
+        choices=[
+            "quality_vqa", "paper_legacy", "paper_aaai26",
+            "paper_aaai26_outline", "paper_aaai26_lowfill",
+        ],
         default="quality_vqa",
         help="Quality-first defaults or historical paper rendering/filtering",
     )

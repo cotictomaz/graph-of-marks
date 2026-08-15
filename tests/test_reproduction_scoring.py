@@ -69,3 +69,10 @@ def test_keep_ids_returns_surviving_question_ids():
         {"question_id": "c", "question": "Is there a horse?", "answer": "yes"},
     ]
     assert keep_ids(rows) == {"b", "c"}
+
+
+def test_subjective_questions_are_filtered():
+    assert appearance_reason("Have you visited this zoo?", ["yes"]) == "subjective"
+    assert appearance_reason("Does the dog like what he's eating?", ["yes"]) == "subjective"
+    assert appearance_reason("Were these taken on the same day?", ["yes"]) == "subjective"
+    assert appearance_reason("How many potted plants do you see?", ["3"]) is None

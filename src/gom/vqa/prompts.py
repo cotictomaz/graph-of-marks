@@ -11,6 +11,7 @@ PROMPT_PROFILES = (
     "supplementary_concise",
     "visual_aid_concise",
     "relation_explicit_concise",
+    "direct_concise",
 )
 
 SYSTEM_RAW = "You are a helpful visual assistant."
@@ -60,6 +61,23 @@ RELATION_EXPLICIT_SUFFIX = (
     "Use directed arrows only when relevant. Do not mention object IDs or relation "
     "descriptions unless the question asks for them."
 )
+# direct_concise: supplementary_concise wording with an anti-plan answer
+# instruction on every condition. Targets models (LlamaV-o1) that otherwise
+# emit a reasoning plan instead of an answer when marks are present.
+DIRECT_ANSWER_INSTRUCTION = (
+    "Answer with the final answer only, using a single word or phrase. "
+    "Do not describe your approach or explain your reasoning."
+)
+_CONCISE_INSTRUCTIONS = (
+    "Answer the question using a single word or phrase.",
+    "Answer using a single word or phrase.",
+)
+
+
+def _directify(user: str) -> str:
+    for sentence in _CONCISE_INSTRUCTIONS:
+        user = user.replace(sentence, DIRECT_ANSWER_INSTRUCTION)
+    return user
 
 
 def build_vqa_prompt(
@@ -81,7 +99,10 @@ def build_vqa_prompt(
         )
 
     if mode == "raw" or profile == "neutral_concise":
-        return SYSTEM_RAW, USER_RAW.format(question=question)
+        user = USER_RAW.format(question=question)
+        if profile == "direct_concise":
+            user = _directify(user)
+        return SYSTEM_RAW, user
 
     if mode == "visual_textual":
         if scene_graph is None:
@@ -106,4 +127,6 @@ def build_vqa_prompt(
         system += VISUAL_AID_SUFFIX
     elif profile == "relation_explicit_concise":
         system += RELATION_EXPLICIT_SUFFIX
+    elif profile == "direct_concise":
+        user = _directify(user)
     return system, user

@@ -141,6 +141,17 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Forward one explicit decoding setting (SEED,TEMPERATURE,TOP_P) to inference.",
     )
+    parser.add_argument(
+        "--render-profile",
+        default="paper_aaai26",
+        help="Preprocessing render profile (paper_aaai26 or a *_outline/*_lowfill variant).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Forward a row limit to inference (pilot runs against partial artifacts).",
+    )
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -461,7 +472,7 @@ def preprocess(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
             output = args.data_root / "artifacts" / dataset / "preprocessing"
             command = docker_base("gom-paper-preprocess:1", args) + [
                 "python3", "src/image_preprocessor.py",
-                "--profile", "paper_aaai26",
+                "--profile", args.render_profile,
                 "--json_file", str(source.resolve()),
                 "--output_folder", str(output.resolve()),
                 "--paper_fasttext_path", str(absolute_without_resolving(args.fasttext)),
@@ -509,7 +520,7 @@ def preprocess(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
                 script_parts.append(
                     " ".join([
                         "python3", "src/image_preprocessor.py",
-                        "--profile", "paper_aaai26",
+                        "--profile", args.render_profile,
                         "--json_file", shlex.quote(str(chunk_path.resolve())),
                         "--output_folder", shlex.quote(str(output.resolve())),
                         "--paper_fasttext_path",
@@ -600,6 +611,8 @@ def inference(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
             command.append("--single-setting")
         if args.setting:
             command.extend(["--setting", args.setting])
+        if args.limit:
+            command.extend(["--limit", str(args.limit)])
         if args.resume:
             command.append("--resume")
         run(command, dry_run=args.dry_run)

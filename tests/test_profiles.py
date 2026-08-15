@@ -58,3 +58,18 @@ def test_aaai26_profile_rejects_drift():
     cfg.wbf_iou_threshold = 0.55
     with pytest.raises(ValueError, match="configuration drift"):
         validate_paper_config(cfg)
+
+
+def test_outline_and_lowfill_variants_differ_from_paper_only_in_fill():
+    outline = default_config("paper_aaai26_outline")
+    lowfill = default_config("paper_aaai26_lowfill")
+    paper = default_config("paper_aaai26")
+    assert not outline.fill_segmentation
+    assert lowfill.fill_segmentation and lowfill.seg_fill_alpha == 0.10
+    for cfg in (outline, lowfill):
+        assert cfg.sam_version == paper.sam_version
+        assert cfg.paper_require_fasttext
+        assert cfg.render_variants == paper.render_variants
+    # variants must not trip the paper lock
+    validate_paper_config(outline)
+    validate_paper_config(lowfill)

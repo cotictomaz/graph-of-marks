@@ -14,9 +14,11 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT / "data_paper"))
 
 from common import PAPER_SPEC, first_row_per_image, load_yaml, sha256_file
 from question_filter import keep_ids
+from vqa_metrics import gqa_hit, vqa_soft_acc_phrase
 
 
 CONTRACTIONS = {
@@ -280,6 +282,7 @@ def main() -> int:
                     continue
                 run_scores = []
                 released_code_run_scores = []
+                lenient_run_scores = []
                 for seed, temperature, top_p in settings:
                     path = prediction_path(
                         args.data_root, model, dataset, condition,
@@ -298,6 +301,7 @@ def main() -> int:
                         ]
                     scores = []
                     released_code_scores = []
+                    lenient_scores = []
                     for prediction in predictions:
                         row = by_id[prediction["question_id"]]
                         scores.append(
@@ -315,7 +319,20 @@ def main() -> int:
                                     prediction["prediction"], row["answer"]
                                 )
                             )
+                            lenient_scores.append(
+                                vqa_soft_acc_phrase(
+                                    prediction["prediction"], row["answers"]
+                                )
+                            )
+                        elif dataset == "gqa":
+                            lenient_scores.append(
+                                gqa_hit(prediction["prediction"], row["answer"])
+                            )
                     run_scores.append(100.0 * sum(scores) / len(scores))
+                    if lenient_scores:
+                        lenient_run_scores.append(
+                            100.0 * sum(lenient_scores) / len(lenient_scores)
+                        )
                     if released_code_scores:
                         released_code_run_scores.append(
                             100.0
@@ -336,6 +353,10 @@ def main() -> int:
                     "min_accuracy_points": min(run_scores),
                     "max_accuracy_points": max(run_scores),
                 }
+                if lenient_run_scores:
+                    result["lenient_mean_accuracy_points"] = statistics.mean(
+                        lenient_run_scores
+                    )
                 if released_code_run_scores:
                     result["released_code_mean_accuracy_points"] = statistics.mean(
                         released_code_run_scores
@@ -372,8 +393,8 @@ def main() -> int:
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     markdown = args.output.with_suffix(".md")
     lines = [
-        "| Model | Dataset | Condition | N | Primary accuracy | Released-code VQA compatibility |",
-        "|---|---|---|---:|---:|---:|",
+        "| Model | Dataset | Condition | N | Primary accuracy | Lenient | Released-code VQA compatibility |",
+        "|---|---|---|---:|---:|---:|---:|",
     ]
     for row in report_rows:
         compatibility = (
@@ -382,11 +403,16 @@ def main() -> int:
             if "released_code_mean_accuracy_points" in row
             else "n/a"
         )
+        lenient = (
+            f"{row['lenient_mean_accuracy_points']:.2f}"
+            if "lenient_mean_accuracy_points" in row
+            else "n/a"
+        )
         lines.append(
             f"| {row['model']} | {row['dataset']} | {row['condition']} | "
             f"{row['n_scored']}/{row['n_total']} | "
             f"{row['mean_accuracy_points']:.2f} +/- {row['std_accuracy_points']:.2f} | "
-            f"{compatibility} |"
+            f"{lenient} | {compatibility} |"
         )
     markdown.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {args.output} and {markdown}")
