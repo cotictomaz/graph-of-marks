@@ -59,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         help="Run the saved best setting: seed=0, temperature=0.2, top_p=0.9.",
     )
     parser.add_argument(
+        "--setting",
+        default="",
+        help="Run one explicit decoding setting as SEED,TEMPERATURE,TOP_P.",
+    )
+    parser.add_argument(
         "--artifact-granularity", choices=("image", "question"), default="image"
     )
     parser.add_argument(
@@ -242,11 +247,15 @@ def main() -> int:
         raise ValueError(f"Unknown model key {args.model_key!r}")
     datasets = [value.strip() for value in args.datasets.split(",") if value.strip()]
     decode = spec["published_decoding"]
-    settings = (
-        [(0, 0.2, 0.9)]
-        if args.single_setting
-        else list(itertools.product(decode["seeds"], decode["temperatures"], decode["top_p"]))
-    )
+    if args.setting:
+        seed, temperature, top_p = args.setting.split(",")
+        settings = [(int(seed), float(temperature), float(top_p))]
+    elif args.single_setting:
+        settings = [(0, 0.2, 0.9)]
+    else:
+        settings = list(
+            itertools.product(decode["seeds"], decode["temperatures"], decode["top_p"])
+        )
 
     from vllm import LLM, SamplingParams
 

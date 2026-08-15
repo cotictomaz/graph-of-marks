@@ -195,6 +195,21 @@ reproducing the paper's reported gains. Both runs' full tables: `reproduction/RE
 the recorded run stays in `reproduction/data/`, the corrected one in `reproduction/data_v2/`
 (both machine-local, gitignored).
 
+**Generation-level audit (2026-08-15, `reproduction/GENERATION_AUDIT.md`, reproducible via
+`reproduction/audit_generations.py`) — read it before interpreting ANY Table 2 number:**
+(1) LlamaV's marked deficit is a chat-protocol artifact — 37–54% of its marked generations
+are answer-less "I will analyze…" plan statements (0.2–1.7% on raw); not a visual result.
+(2) Qwen's residual −7..−9 is evidence destruction of the queried objects: Algorithm 3
+selects exactly the query-relevant objects and the locked `fill_segmentation` then makes
+them unrecognizable (plants→"0 plants", zebra→"dog"); yes→no existence denial is the top
+flip category; a "marks are optional aids" prompt does nothing (≤0.5) because the pixels
+are gone. (3) Gemma's gains are mostly answer-format calibration — lenient scoring erases
+the GQA gain (+1.99→−0.92) and most of VQAv2 (+1.51); only VQAv1 keeps ~+5 genuine.
+(4) Truncation ruled out; the off-grid decode setting (0,0.2,0.9 ∉ published grid) shifts
+nothing (≤0.7, tested at 42/0.1/0.9 via the new `--setting` flag on
+`run_table2.py`/`reproduce.py`). Net: outline-only rendering (the non-paper default) is the
+obvious fix direction, but it is outside the locked paper profile.
+
 ## Known confounds in the Table 2 negative result
 
 Established 2026-08-11 from the existing artifacts; **the appearance-filtered re-score was

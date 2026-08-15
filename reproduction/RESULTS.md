@@ -182,6 +182,17 @@ overlay still costs more than the scene graph adds, even at declared opacity wit
 query-pruned marks and appearance questions removed. Reports:
 `data_v2/table2_report.supplementary_concise{,.appearance_filtered}.{json,md}`.
 
+**Read `GENERATION_AUDIT.md` before quoting any of these numbers.** The generation-level
+audit (2026-08-15) establishes: LlamaV's marked cells are 37–54% answer-less "plan"
+statements (a chat-protocol artifact, not a visual result); Qwen's residual deficit is
+evidence destruction of the very objects Algorithm 3 selects (the fill makes the queried
+objects unrecognizable — existence denial and identity swaps follow); and **Gemma's gains
+are mostly answer-format calibration** — under lenient phrase scoring its GQA gain
+disappears (+1.99 → −0.92) and VQAv2 drops to +1.51; only VQAv1 keeps a genuine ~+5.
+Truncation is ruled out, the off-grid decode setting changes nothing (≤0.7 points), and a
+"marks are optional aids" prompt changes nothing (≤0.5) — the deficit is in the pixels,
+not the protocol.
+
 ## Caveats
 
 - **One decode setting, not the published 27-point grid.** Every cell is a single

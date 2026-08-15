@@ -136,6 +136,11 @@ def parse_args() -> argparse.Namespace:
         help="Extra environment for the container, e.g. VLLM_ATTENTION_BACKEND=XFORMERS.",
     )
     parser.add_argument("--prompt-profile", default="paper_declared")
+    parser.add_argument(
+        "--setting",
+        default="",
+        help="Forward one explicit decoding setting (SEED,TEMPERATURE,TOP_P) to inference.",
+    )
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -593,6 +598,8 @@ def inference(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
             command.append("--one-per-image")
         if args.single_setting:
             command.append("--single-setting")
+        if args.setting:
+            command.extend(["--setting", args.setting])
         if args.resume:
             command.append("--resume")
         run(command, dry_run=args.dry_run)
