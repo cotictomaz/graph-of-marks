@@ -180,14 +180,20 @@ so marked conditions answer in ~20 words and score ~0 by construction under exac
 `supplementary_concise` adds that same instruction to the marked conditions and is the only
 fair comparison. (`released_artifact_bare` is the third, for the released VQAv2 path.)
 
-**Current state (Table 2 run completed 2026-08-10, `supplementary_concise`, 1K images/dataset,
-single decode setting):** marks never beat raw on VQA for any of the three models. Gemma-3-4B is
-at parity (GQA 48.00 raw vs 48.60 best marked, inside noise); Qwen2.5-VL-7B loses 13–17 points
-and LlamaV-o1-11B 34–42. The damage is dominated by the overlay occluding the photo, not by the
-scene graph: `segmented` (masks + contours, no IDs and no arrows) already costs Qwen 13–17 points
-and is still its *best* marked condition on every VQA dataset. RefCOCOg is the one task where marks are indispensable (raw is 0 by construction);
-best mark style there is model-dependent, with a 23-point swing for Qwen between text and
-numeric IDs. Do not present these as reproducing the paper's reported gains.
+**Current state (corrected-pipeline rerun completed 2026-08-15, `reproduction/data_v2/`,
+`supplementary_concise`, 1K images/dataset, single decode setting).** The 2026-08-10 recorded
+run had two pipeline defects — double mask fill (effective α 0.4375) and inert Algorithm 3
+(its artifacts predate `039e152`, so every detected object was marked). The rerun with the
+fixed renderer (true α 0.25) and active Algorithm 3 (3–6 query-relevant marks instead of
+20–35): **Gemma-3-4B now gains from marks on all three VQA datasets** (+1.0/+3.6/+1.6
+unfiltered; +3.4/+6.7/+4.9 with appearance questions excluded — paper *direction* reproduces,
+short of its ~+7). Qwen2.5-VL-7B improves ~5 points per cell but still loses 7–11; LlamaV-o1-11B
+stays at −32..−40. Raw reproduced exactly across all cells (determinism check). RefCOCOg
+improves modestly for all three; best mark style stays model-dependent (Gemma text, Qwen/LlamaV
+numeric IDs). The across-model claim still does not reproduce — do not present these as
+reproducing the paper's reported gains. Both runs' full tables: `reproduction/RESULTS.md`;
+the recorded run stays in `reproduction/data/`, the corrected one in `reproduction/data_v2/`
+(both machine-local, gitignored).
 
 ## Known confounds in the Table 2 negative result
 
@@ -244,6 +250,9 @@ The appearance confound explains Gemma entirely and **leaves Qwen at ~−12 and 
 unexplained**. Marks help only the weakest model, and only off appearance questions — still
 not the paper's across-model gains. Full table:
 `reproduction/data/table2_report.supplementary_concise.appearance_filtered.{json,md}`.
+The corrected-pipeline rerun (2026-08-15, see "Current state" above) narrows Qwen to
+−7..−9 filtered and moves LlamaV barely — the residual deficit is not explained by fill
+opacity, mark count, or appearance questions.
 
 **Subset scoring mechanics** (implemented): `score_table2.py --question-filter appearance`
 filters the *prediction* list by `question_id` after a full-coverage check — never the eval

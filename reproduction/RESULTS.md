@@ -3,6 +3,11 @@
 Completed 2026-08-10 on the exact author image splits. This supersedes the earlier
 single-experiment record; the incompatible released-artifact scores are kept at the end.
 
+> **A corrected-pipeline rerun completed 2026-08-15** (single 0.25 fill + active
+> Algorithm 3) — see §"Corrected-pipeline rerun" below. That run is the
+> paper-faithful reference; the tables directly below are the original recorded run,
+> kept for the before/after comparison.
+
 ## What was run
 
 | | |
@@ -125,6 +130,57 @@ marked condition beats raw by 3.0–4.4 points on all three datasets. It does no
 Qwen (still −8.6 to −12.5) or LlamaV (still ~−35). Marks help only the weakest of the
 three models, and only once appearance questions are excluded — do not present this as
 reproducing the paper's across-model gains.
+
+## Corrected-pipeline rerun (`data_v2`, 2026-08-15)
+
+The recorded run above had two pipeline defects, both fixed on 2026-08-14: the mask fill
+was applied twice (effective opacity 0.4375 instead of the declared 0.25), and its
+preprocessing artifacts dated from before commit `039e152`, so Algorithm 3 never pruned —
+every detected object was marked (often 20–35 per image). The rerun regenerated everything
+into `reproduction/data_v2/` with the corrected renderer and active Algorithm 3
+(typically 3–6 query-relevant marks per image), same splits, models, prompts
+(`supplementary_concise`), and decoding. Raw reproduced **exactly** (all 9 model×dataset
+cells identical to the recorded run — raw does not touch renders), confirming harness
+determinism; the graph audit passed with 0 errors.
+
+| model | dataset | raw | segmented | som_numeric | gom_text | gom_numeric | gom_text_lab | gom_num_lab |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| gemma3_4b | GQA | 48.00 | 48.50 | 48.00 | **49.00** | 47.50 | 48.10 | 48.00 |
+| gemma3_4b | VQAv1 | 60.47 | **64.06** | 63.55 | 62.74 | 61.55 | 61.33 | 59.50 |
+| gemma3_4b | VQAv2 | 58.74 | **60.35** | 58.47 | 58.09 | 57.31 | 56.03 | 56.04 |
+| gemma3_4b | RefCOCOg | — | — | 44.44 | **45.37** | 38.19 | 42.79 | 34.58 |
+| qwen25_vl_7b | GQA | **74.50** | 63.10 | 60.80 | 61.80 | 60.70 | 59.80 | 60.10 |
+| qwen25_vl_7b | VQAv1 | **87.86** | 76.35 | 74.36 | 73.13 | 72.26 | 71.69 | 69.82 |
+| qwen25_vl_7b | VQAv2 | **86.04** | 75.23 | 71.53 | 73.03 | 71.11 | 70.76 | 68.75 |
+| qwen25_vl_7b | RefCOCOg | — | — | **41.78** | 20.04 | 35.88 | 21.23 | 37.28 |
+| llamav_o1_11b | GQA | **61.50** | 29.60 | 26.60 | 26.10 | 26.30 | 22.00 | 21.60 |
+| llamav_o1_11b | VQAv1 | **78.34** | 39.96 | 38.63 | 35.71 | 37.69 | 29.49 | 31.93 |
+| llamav_o1_11b | VQAv2 | **75.38** | 35.61 | 35.15 | 31.72 | 33.41 | 26.89 | 28.16 |
+| llamav_o1_11b | RefCOCOg | — | — | **34.91** | 0.85 | 24.34 | 1.20 | 15.66 |
+
+Δ = best marked − raw, recorded run → corrected run:
+
+| model | dataset | unfiltered | appearance-filtered |
+|---|---|---:|---:|
+| gemma3_4b | GQA | +0.60 → **+1.00** | +3.06 → **+3.36** |
+| gemma3_4b | VQAv1 | −0.22 → **+3.59** | +4.42 → **+6.71** |
+| gemma3_4b | VQAv2 | −1.16 → **+1.61** | +3.02 → **+4.92** |
+| qwen25_vl_7b | GQA | −13.60 → −11.40 | −8.56 → −7.03 |
+| qwen25_vl_7b | VQAv1 | −16.72 → −11.51 | −12.50 → −8.33 |
+| qwen25_vl_7b | VQAv2 | −15.79 → −10.81 | −12.42 → −8.94 |
+| llamav_o1_11b | GQA | −33.70 → −31.90 | −35.17 → −33.64 |
+| llamav_o1_11b | VQAv1 | −41.00 → −38.38 | −35.62 → −33.02 |
+| llamav_o1_11b | VQAv2 | −41.98 → −39.77 | −35.82 → −33.51 |
+
+**Verdict.** The corrected pipeline reproduces the paper's *direction* for Gemma-3-4B only:
+marks now beat raw on all three VQA datasets even unfiltered, reaching +3.4 to +6.7 with
+appearance questions excluded (still short of the paper's ~+7). Every Qwen marked cell
+gains 2–6 points and RefCOCOg improves for all three models (best styles unchanged:
+Gemma text IDs, Qwen/LlamaV numeric), but Qwen still loses 7–11 points and LlamaV 32–40.
+The across-model claim does not reproduce: for models with strong native grounding the
+overlay still costs more than the scene graph adds, even at declared opacity with
+query-pruned marks and appearance questions removed. Reports:
+`data_v2/table2_report.supplementary_concise{,.appearance_filtered}.{json,md}`.
 
 ## Caveats
 

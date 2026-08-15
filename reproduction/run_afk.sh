@@ -13,8 +13,8 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-DATA_ROOT=$ROOT/reproduction/data
-FASTTEXT=$DATA_ROOT/cc.en.300.kv
+DATA_ROOT=${GOM_PAPER_DATA:-$ROOT/reproduction/data}
+FASTTEXT=${GOM_FASTTEXT:-$DATA_ROOT/cc.en.300.kv}
 # Same default as reproduce.py, so both entry points share one cache.  The box
 # this ran on originally used GOM_MODEL_CACHE=/llms.
 MODEL_CACHE=${GOM_MODEL_CACHE:-$HOME/.cache/gom-paper}
@@ -190,7 +190,7 @@ else
     WORKERS=1
     if [ "$(vram_free)" -ge 24000 ]; then WORKERS=2; fi
     say "preprocessing with $WORKERS worker(s) ($(vram_free) MiB free)"
-    stage preprocess reproduce preprocess --preprocess-workers "$WORKERS"
+    stage preprocess reproduce preprocess --preprocess-workers "$WORKERS" --one-per-image
 fi
 
 stage audit reproduce audit
