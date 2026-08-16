@@ -1,10 +1,11 @@
 # Visual inspection: 10 instances where Qwen2.5-VL-7B was right on the raw image and wrong after GoM
 
 **Scope note:** this file shows the `segmented` condition — masks only, no IDs/arrows —
-because it is GoM's *best-scoring* marked condition. For the full GoM form (IDs + relation
-arrows + relation labels) on spatial/relational questions, see
-**`FLIP_EXAMPLES_FULL_GOM.md`**, including the per-condition score ladder showing all seven
-conditions were measured.
+because it is GoM's *best-scoring* marked condition. For GoM as the paper declares it —
+**filled colored segments + ID labels + relation arrows** — see
+**`FLIP_EXAMPLES_PAPER_GOM.md`** (paper-faithful fill from data_v2), and
+**`FLIP_EXAMPLES_FULL_GOM.md`** for the outline-run equivalent with the per-condition
+score ladder showing all seven conditions were measured.
 
 Run: `data_v3` (best config — outline-only marks, `direct_concise` prompt), condition `segmented`.
 Each case shows the original photo, the preprocessed image the model actually saw, and the
