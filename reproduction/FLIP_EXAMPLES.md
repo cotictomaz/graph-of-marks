@@ -169,3 +169,181 @@ verbatim generations. Images are copied under `reproduction/flip_examples/`.
 | original | preprocessed (what the model saw) |
 |---|---|
 | ![original](flip_examples/10_2318490_original.jpg) | ![marked](flip_examples/10_2318490_marked.jpg) |
+
+---
+
+## Further examples (11–20): other models and VQAv1 included
+
+Same run and condition as above; cases 11–14 are Qwen2.5-VL-7B, 15–17 Gemma-3-4B,
+18–20 LlamaV-o1-11B. Chosen to exclude scoring artifacts (synonym/format mismatches) —
+each is a genuine perception flip.
+
+## 11. `2403371` (GQA, Qwen2.5-VL-7B)
+
+**Question:** Which side of the image is the wet bench on?
+**Gold answer(s):** The bench is on the right of the image., right
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **right** ✅ |
+| segmented (marked image) | **left** ❌ |
+| gom_text (marked + IDs) | right |
+
+*Mechanism:* spatial side flip: the marked bench reads as being on the other side
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/11_2403371_original.jpg) | ![marked](flip_examples/11_2403371_marked.jpg) |
+
+## 12. `COCO_train2014_000000504259` (VQAV1, Qwen2.5-VL-7B)
+
+**Question:** Are all of the sheep facing the same direction?
+**Gold answer(s):** yes
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **yes** ✅ |
+| segmented (marked image) | **No** ❌ |
+| gom_text (marked + IDs) | No |
+
+*Mechanism:* group-attribute denial: same-color masks on all sheep hide their orientation
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/12_COCO_train2014_000000504259_original.jpg) | ![marked](flip_examples/12_COCO_train2014_000000504259_marked.jpg) |
+
+## 13. `COCO_train2014_000000520112` (VQAV1, Qwen2.5-VL-7B)
+
+**Question:** What are the men doing?
+**Gold answer(s):** drinking, drinking wine, talking, tasting wine, watching something, wine tasting
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **drinking** ✅ |
+| segmented (marked image) | **standing** ❌ |
+| gom_text (marked + IDs) | standing |
+
+*Mechanism:* activity misread: contours freeze the action into 'standing'
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/13_COCO_train2014_000000520112_original.jpg) | ![marked](flip_examples/13_COCO_train2014_000000520112_marked.jpg) |
+
+## 14. `COCO_train2014_000000305527` (VQAV2, Qwen2.5-VL-7B)
+
+**Question:** Is the Frisbee upside down?
+**Gold answer(s):** yes
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **Yes** ✅ |
+| segmented (marked image) | **No** ❌ |
+| gom_text (marked + IDs) | No |
+
+*Mechanism:* object-state flip (upside down) with contour over the frisbee
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/14_COCO_train2014_000000305527_original.jpg) | ![marked](flip_examples/14_COCO_train2014_000000305527_marked.jpg) |
+
+## 15. `2317129` (GQA, Gemma-3-4B)
+
+**Question:** Are the olives to the left or to the right of the cheese?
+**Gold answer(s):** The olives are to the left of the cheese., left
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **Left** ✅ |
+| segmented (marked image) | **Right** ❌ |
+| gom_text (marked + IDs) | Right |
+
+*Mechanism:* left/right inversion on the exact spatial question type GoM targets
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/15_2317129_original.jpg) | ![marked](flip_examples/15_2317129_marked.jpg) |
+
+## 16. `COCO_train2014_000000131172` (VQAV2, Gemma-3-4B)
+
+**Question:** How many men in the picture are wearing sunglasses?
+**Gold answer(s):** 1, 2
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **One** ✅ |
+| segmented (marked image) | **Two** ❌ |
+| gom_text (marked + IDs) | Two |
+
+*Mechanism:* count inflated: contour edges read as an extra person with sunglasses
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/16_COCO_train2014_000000131172_original.jpg) | ![marked](flip_examples/16_COCO_train2014_000000131172_marked.jpg) |
+
+## 17. `COCO_train2014_000000291855` (VQAV1, Gemma-3-4B)
+
+**Question:** Is this a private bus?
+**Gold answer(s):** no, yes
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **No** ✅ |
+| segmented (marked image) | **Yes** ❌ |
+| gom_text (marked + IDs) | Yes |
+
+*Mechanism:* attribute hallucination under marks (private bus)
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/17_COCO_train2014_000000291855_original.jpg) | ![marked](flip_examples/17_COCO_train2014_000000291855_marked.jpg) |
+
+## 18. `2409037` (GQA, LlamaV-o1-11B)
+
+**Question:** Is the clock on the right side?
+**Gold answer(s):** No, the clock is on the left of the image., no
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **No** ✅ |
+| segmented (marked image) | **Yes** ❌ |
+| gom_text (marked + IDs) | Yes |
+
+*Mechanism:* spatial side flip for the weakest model
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/18_2409037_original.jpg) | ![marked](flip_examples/18_2409037_marked.jpg) |
+
+## 19. `COCO_train2014_000000262171` (VQAV2, LlamaV-o1-11B)
+
+**Question:** How many people are on the boat?
+**Gold answer(s):** 5, 6, 7, 9
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **5** ✅ |
+| segmented (marked image) | **4** ❌ |
+| gom_text (marked + IDs) | 5 |
+
+*Mechanism:* count dropped: one masked person not counted
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/19_COCO_train2014_000000262171_original.jpg) | ![marked](flip_examples/19_COCO_train2014_000000262171_marked.jpg) |
+
+## 20. `COCO_train2014_000000025241` (VQAV1, LlamaV-o1-11B)
+
+**Question:** What part of the body are these worn around?
+**Gold answer(s):** around neck, man, neck
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **Neck** ✅ |
+| segmented (marked image) | **Belt** ❌ |
+| gom_text (marked + IDs) | waist |
+
+*Mechanism:* worn-around-neck -> 'Belt': identity displaced by marks
+
+| original | preprocessed (what the model saw) |
+|---|---|
+| ![original](flip_examples/20_COCO_train2014_000000025241_original.jpg) | ![marked](flip_examples/20_COCO_train2014_000000025241_marked.jpg) |
