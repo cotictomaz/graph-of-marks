@@ -133,6 +133,13 @@ _ATTRIBUTE_WORDS = {
 
 _PERSON_PRONOUNS = {"he", "her", "hers", "him", "his", "she"}
 
+# Real objects that happen to end in -ing/-ed, exempt from the participle filter.
+_PARTICIPLE_OBJECTS = {
+    "building", "buildings", "ceiling", "painting", "paintings", "awning",
+    "clothing", "railing", "siding", "shed", "sled", "seed", "weed", "bed",
+    "hedge", "wing", "wings", "ring", "rings", "string", "swing", "curtaining",
+}
+
 # Words that survive the stopword/attribute filters but are not visual objects.
 # Only used to keep open-vocabulary detector queries clean; the closed-set
 # anchors above are unaffected.
@@ -293,6 +300,15 @@ def parse_question_intent(question: str) -> QuestionIntent:
     # returns nothing above threshold.
     covered = set(anchors) | set(categories) | set(expanded)
     covered |= {word for phrase in compounds for word in phrase.split()}
+    def _is_participle(token: str) -> bool:
+        # Participles and predicate adjectives must never become marks: the
+        # question "unpeeled or peeled" rendered `peeled_1`/`unpeeled_2` onto
+        # arbitrary fruit - the answer options drawn on the image - and
+        # "throwing" labelled a frisbee `throwing_1`.
+        if token in _PARTICIPLE_OBJECTS:
+            return False
+        return token.endswith("ing") or token.endswith("ed")
+
     open_candidates = [
         token
         for token in tokens
@@ -301,6 +317,7 @@ def parse_question_intent(question: str) -> QuestionIntent:
         and token not in _ATTRIBUTE_WORDS
         and token not in relation_words
         and token not in _META_WORDS
+        and not _is_participle(token)
         and token not in covered
         and canonical_object_label(token) not in covered
         and canonical_object_label(token) not in _VISUAL_OBJECTS

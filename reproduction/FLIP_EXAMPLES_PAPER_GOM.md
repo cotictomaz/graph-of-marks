@@ -1,344 +1,357 @@
-# GoM failures under the final configuration (gom_v3 renders)
+# GoM failures after the gom_v3 fixes (20 previously unshown cases)
 
-Every render below is the final GoM form - condition `gom_text_labeled` from the
-`data_v6` run: outline renders, open-vocabulary question-driven marks, deterministic
-zero-overlap label placement, `gom_v2_concise` prompt, curated eval. Model:
-Qwen2.5-VL-7B. All cases: correct on the clean image, wrong on the GoM image
-(lenient scoring).
+Condition `gom_text_labeled` from the `data_v6` run - outline renders, open-vocabulary
+question-driven marks, deterministic zero-overlap label placement, `gom_v2_concise`
+prompt, curated eval. Model: Qwen2.5-VL-7B. Every case is correct on the clean image
+and wrong on the GoM image (lenient scoring). These 20 are drawn from the 101 flips
+that no earlier gallery has shown; each mechanism below was read off the render, not
+inferred from the answer string.
 
-The renders no longer show the defects the previous audit found: label boxes never
-overlap (verified run-wide, 3,975 images x 6 variants), marks average 3.6 per image,
-part-of-object fragment marks are removed, and question nouns outside the closed
-ontology are detected. What remains are the failures that survive a clean render.
+The defects the earlier audits found are gone: no label overlaps anywhere in the run
+(3,975 images x 6 variants), 3.6 marks per image, no fragment duplicates, and question
+nouns outside the closed ontology are now detected. What these 20 show instead:
 
-Flip pool: 125 raw-right -> GoM-wrong instances out of 996 GQA rows
-(identity/other 37, ID leak 25, yes->no 22, label echo 15, no->yes 14, left/right 12).
-Run record: `RESULTS.md` section gom_v3.
+| mechanism | cases | fixable |
+|---|---|---|
+| ID leak - answers a reference tag on a clean render | 1-4 | no (prompting fails; numeric IDs avoid it) |
+| queried object never outlined -> existence denied | 5-8, 11 | detector recall ceiling |
+| marks point at other objects / assert a false premise | 9, 12-14 | partly: relation choice |
+| **question words became marks** | **15, 20** | **yes - new defect, see below** |
+| generic or wrong class on the queried object | 16, 17 | yes - label preference |
+| left/right inversion with the arrow drawn | 10 | no |
+| singular/plural, model error | 18, 19 | scorer / none |
 
-## 1. `2387333` (GQA)
+**The one regression this gallery introduces is mine.** Opening the detector vocabulary
+to any content noun also let adjectives and verbs through. In case 15 the question's own
+answer options are drawn on the image as `peeled_1` and `unpeeled_2`; in case 20 a frisbee
+is labelled `throwing_1`. Marks that spell out candidate answers are worse than no marks.
+The `_META_WORDS` stoplist needs the question's answer-bearing adjectives and -ing verbs,
+and a re-run is required before this gallery is superseded.
 
-**Question:** Who is in front of the house?
-**Gold:** boy, The boy is in front of the house.
-
-| condition | model output |
-|---|---|
-| raw (clean image) | **Boy** OK |
-| GoM (outline + IDs + arrows) | **person_1** WRONG |
-
-*Mechanism:* ID leakage: the model answers with a mark's reference tag instead of naming the person
-
-| original | GoM render (what the model saw) |
-|---|---|
-| ![o](flip_examples_paper_gom/v3_01_2387333_original.jpg) | ![g](flip_examples_paper_gom/v3_01_2387333_gom.jpg) |
-
-## 2. `2333988` (GQA)
+## 1. `2347957` (GQA) - ID leak
 
 **Question:** Who is wearing a jacket?
 **Gold:** woman, The woman is wearing a jacket.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **woman** OK |
-| GoM (outline + IDs + arrows) | **person_1** WRONG |
+| raw (clean image) | **woman** correct |
+| GoM (outline + IDs + arrows) | **person_1** wrong |
 
-*Mechanism:* ID leakage: the model answers with a mark's reference tag instead of naming the person
+*Mechanism:* clean 3-mark render; the model answers the tag `person_1` instead of naming the woman
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_02_2333988_original.jpg) | ![g](flip_examples_paper_gom/v3_02_2333988_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_01_2347957_original.jpg) | ![g](flip_examples_paper_gom/v4_01_2347957_gom.jpg) |
 
-## 3. `2397817` (GQA)
+## 2. `2348675` (GQA) - ID leak
 
-**Question:** Who is wearing the hat?
-**Gold:** umpire, The umpire is wearing a hat.
+**Question:** Who is holding the racket in the center?
+**Gold:** girl, The girl is holding the racket.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **umpire** OK |
-| GoM (outline + IDs + arrows) | **person_2** WRONG |
+| raw (clean image) | **girl** correct |
+| GoM (outline + IDs + arrows) | **person_1** wrong |
 
-*Mechanism:* ID leakage: the model answers with a mark's reference tag instead of naming the person
+*Mechanism:* clean render (girl + two racket marks); answers `person_1` instead of `girl`
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_03_2397817_original.jpg) | ![g](flip_examples_paper_gom/v3_03_2397817_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_02_2348675_original.jpg) | ![g](flip_examples_paper_gom/v4_02_2348675_gom.jpg) |
 
-## 4. `2368367` (GQA)
+## 3. `2380524` (GQA) - ID leak
 
-**Question:** Who is holding the open laptop?
-**Gold:** boy, The boy is holding the laptop.
+**Question:** Who is wearing a tee shirt?
+**Gold:** man, The man is wearing a tee shirt.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **Boy** OK |
-| GoM (outline + IDs + arrows) | **person_2** WRONG |
+| raw (clean image) | **Man** correct |
+| GoM (outline + IDs + arrows) | **person_2** wrong |
 
-*Mechanism:* ID leakage: the model answers with a mark's reference tag instead of naming the person
+*Mechanism:* answers `person_2` instead of `man`
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_04_2368367_original.jpg) | ![g](flip_examples_paper_gom/v3_04_2368367_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_03_2380524_original.jpg) | ![g](flip_examples_paper_gom/v4_03_2380524_gom.jpg) |
 
-## 5. `2326540` (GQA)
+## 4. `2408238` (GQA) - ID leak
 
-**Question:** Do you see vans to the left of the bus on the left?
-**Gold:** yes, Yes, there is a van to the left of the bus.
+**Question:** Who is wearing a watch?
+**Gold:** boy, The boy is wearing a watch.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **yes** OK |
-| GoM (outline + IDs + arrows) | **no** WRONG |
+| raw (clean image) | **Boy** correct |
+| GoM (outline + IDs + arrows) | **person_1** wrong |
 
-*Mechanism:* existence denial: the queried object is outlined, the model still answers no
+*Mechanism:* answers `person_1` instead of `boy`
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_05_2326540_original.jpg) | ![g](flip_examples_paper_gom/v3_05_2326540_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_04_2408238_original.jpg) | ![g](flip_examples_paper_gom/v4_04_2408238_gom.jpg) |
 
-## 6. `392` (GQA)
+## 5. `2341832` (GQA) - queried object unmarked
 
-**Question:** Is the keyboard to the left of the computer?
-**Gold:** yes, Yes, the keyboard is to the left of the computer.
+**Question:** Do you see benches to the right of the bottle that is not open?
+**Gold:** yes, Yes, there is a bench to the right of the bottle.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **Yes** OK |
-| GoM (outline + IDs + arrows) | **No** WRONG |
+| raw (clean image) | **yes** correct |
+| GoM (outline + IDs + arrows) | **no** wrong |
 
-*Mechanism:* existence denial: the queried object is outlined, the model still answers no
+*Mechanism:* no bench is outlined - only the cat and the bottle are marked - and the model reads the absence of a mark as absence of the object
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_06_392_original.jpg) | ![g](flip_examples_paper_gom/v3_06_392_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_05_2341832_original.jpg) | ![g](flip_examples_paper_gom/v4_05_2341832_gom.jpg) |
 
-## 7. `2411265` (GQA)
+## 6. `2315568` (GQA) - queried object unmarked
 
-**Question:** Is there any elephant in the zoo?
-**Gold:** yes, Yes, there are elephants in the zoo.
+**Question:** Do you see a ladle next to the computer that is sitting on the floor?
+**Gold:** yes, Yes, there is a ladle next to the computer.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **Yes** OK |
-| GoM (outline + IDs + arrows) | **No** WRONG |
+| raw (clean image) | **Yes** correct |
+| GoM (outline + IDs + arrows) | **No** wrong |
 
-*Mechanism:* existence denial: the queried object is outlined, the model still answers no
+*Mechanism:* no ladle is outlined; the model answers no
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_07_2411265_original.jpg) | ![g](flip_examples_paper_gom/v3_07_2411265_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_06_2315568_original.jpg) | ![g](flip_examples_paper_gom/v4_06_2315568_gom.jpg) |
 
-## 8. `2320463` (GQA)
+## 7. `2389557` (GQA) - queried object unmarked
 
-**Question:** Do you see trays to the right of the pizza cutter on the shelf?
-**Gold:** yes, Yes, there is a tray to the right of the pizza cutter.
+**Question:** Is the smiling person above a bench?
+**Gold:** yes, Yes, the girl is above a bench.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **yes** OK |
-| GoM (outline + IDs + arrows) | **No** WRONG |
+| raw (clean image) | **Yes** correct |
+| GoM (outline + IDs + arrows) | **No** wrong |
 
-*Mechanism:* existence denial: the queried object is outlined, the model still answers no
+*Mechanism:* the bench is not outlined; the marked person alone does not support the relation
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_08_2320463_original.jpg) | ![g](flip_examples_paper_gom/v3_08_2320463_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_07_2389557_original.jpg) | ![g](flip_examples_paper_gom/v4_07_2389557_gom.jpg) |
 
-## 9. `2385364` (GQA)
+## 8. `2370503` (GQA) - relation names the wrong pair
 
-**Question:** Is the open can to the left or to the right of the shelf the towels are on?
-**Gold:** right, The can is to the right of the shelf.
+**Question:** Is the bicycle behind the tree in the field?
+**Gold:** yes, Yes, the bicycle is behind the tree.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **right** OK |
-| GoM (outline + IDs + arrows) | **left** WRONG |
+| raw (clean image) | **Yes** correct |
+| GoM (outline + IDs + arrows) | **No** wrong |
 
-*Mechanism:* left/right inversion on a direct spatial question, arrows present
+*Mechanism:* the tree is unmarked, so the only `Behind` arrow runs bicycle -> field_1; the graph asserts a relation the question did not ask about
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_09_2385364_original.jpg) | ![g](flip_examples_paper_gom/v3_09_2385364_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_08_2370503_original.jpg) | ![g](flip_examples_paper_gom/v4_08_2370503_gom.jpg) |
 
-## 10. `2376638` (GQA)
+## 9. `2403371` (GQA) - marks point at other objects
 
-**Question:** Are the books of the coffee table to the left or to the right of the couch?
-**Gold:** right, The books are to the right of the couch.
+**Question:** Is the truck to the left or to the right of the bench on the right?
+**Gold:** left, The truck is to the left of the bench.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **right** OK |
-| GoM (outline + IDs + arrows) | **Left** WRONG |
+| raw (clean image) | **left** correct |
+| GoM (outline + IDs + arrows) | **right** wrong |
 
-*Mechanism:* left/right inversion on a direct spatial question, arrows present
+*Mechanism:* neither the truck nor the bench is outlined - the two marks are distant cars - so the arrow describes an unrelated pair
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_10_2376638_original.jpg) | ![g](flip_examples_paper_gom/v3_10_2376638_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_09_2403371_original.jpg) | ![g](flip_examples_paper_gom/v4_09_2403371_gom.jpg) |
 
-## 11. `2322351` (GQA)
+## 10. `2361897` (GQA) - left/right inversion
 
-**Question:** Is the towel to the left or to the right of the cabinet that is on the right side of the photo?
-**Gold:** left, The towel is to the left of the cabinet.
+**Question:** Is the ball to the left or to the right of the man that is wearing socks?
+**Gold:** right, The ball is to the right of the man.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **left** OK |
-| GoM (outline + IDs + arrows) | **right** WRONG |
+| raw (clean image) | **right** correct |
+| GoM (outline + IDs + arrows) | **left** wrong |
 
-*Mechanism:* left/right inversion on a direct spatial question, arrows present
+*Mechanism:* both objects are marked and the arrow is drawn; the model still inverts the direction
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_11_2322351_original.jpg) | ![g](flip_examples_paper_gom/v3_11_2322351_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_10_2361897_original.jpg) | ![g](flip_examples_paper_gom/v4_10_2361897_gom.jpg) |
 
-## 12. `2353443` (GQA)
+## 11. `2367686` (GQA) - queried object unmarked
 
-**Question:** Is the computer to the left of books?
-**Gold:** no, No, the computer is to the left of the papers.
+**Question:** Is the speaker to the right or to the left of the man?
+**Gold:** left, The speaker is to the left of the man.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **no** OK |
-| GoM (outline + IDs + arrows) | **Yes** WRONG |
+| raw (clean image) | **left** correct |
+| GoM (outline + IDs + arrows) | **right** wrong |
 
-*Mechanism:* asserts a relation the photograph contradicts
+*Mechanism:* the speaker is not outlined; only two people and a tie are marked
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_12_2353443_original.jpg) | ![g](flip_examples_paper_gom/v3_12_2353443_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_11_2367686_original.jpg) | ![g](flip_examples_paper_gom/v4_11_2367686_gom.jpg) |
 
-## 13. `2390673` (GQA)
+## 12. `2315716` (GQA) - marks supply a false premise
 
-**Question:** Are there any pizzas to the left of the utensil that is on the right?
-**Gold:** no, No, there is a sandwich to the left of the utensil.
+**Question:** Do you see people to the left of the tall palm trees?
+**Gold:** no, No, the people are to the right of the palms.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **no** OK |
-| GoM (outline + IDs + arrows) | **yes** WRONG |
+| raw (clean image) | **no** correct |
+| GoM (outline + IDs + arrows) | **Yes** wrong |
 
-*Mechanism:* asserts a relation the photograph contradicts
+*Mechanism:* four person marks sit left of the palm-tree marks, so the layout of the labels suggests the very arrangement the gold answer denies
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_13_2390673_original.jpg) | ![g](flip_examples_paper_gom/v3_13_2390673_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_12_2315716_original.jpg) | ![g](flip_examples_paper_gom/v4_12_2315716_gom.jpg) |
 
-## 14. `2390572` (GQA)
+## 13. `2376059` (GQA) - marks supply a false premise
 
-**Question:** Are there bartenders or students in the photo?
-**Gold:** no, No, there are no bartenders or students.
+**Question:** Are there bottles to the right of the doll?
+**Gold:** no, No, there is a cup to the right of the doll.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **No** OK |
-| GoM (outline + IDs + arrows) | **Bartenders** WRONG |
+| raw (clean image) | **no** correct |
+| GoM (outline + IDs + arrows) | **Yes** wrong |
 
-*Mechanism:* mark-label echo: the model repeats a mark's class word instead of the finer-grained truth
+*Mechanism:* the marked bottle/doll pair reads as the asked-about arrangement
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_14_2390572_original.jpg) | ![g](flip_examples_paper_gom/v3_14_2390572_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_13_2376059_original.jpg) | ![g](flip_examples_paper_gom/v4_13_2376059_gom.jpg) |
 
-## 15. `2383493` (GQA)
+## 14. `2378259` (GQA) - marks supply a false premise
 
-**Question:** What kind of animal is the water behind of?
-**Gold:** elephants, The water is behind the elephants.
+**Question:** Is the water bottle to the right of a refrigerator?
+**Gold:** no, No, the water bottle is to the right of the dish washer.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **elephants** OK |
-| GoM (outline + IDs + arrows) | **elephant** WRONG |
+| raw (clean image) | **no** correct |
+| GoM (outline + IDs + arrows) | **Yes** wrong |
 
-*Mechanism:* mark-label echo: the model repeats a mark's class word instead of the finer-grained truth
+*Mechanism:* dense scene; the marked pair reads as the asked-about arrangement
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_15_2383493_original.jpg) | ![g](flip_examples_paper_gom/v3_15_2383493_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_14_2378259_original.jpg) | ![g](flip_examples_paper_gom/v4_14_2378259_gom.jpg) |
 
-## 16. `2369075` (GQA)
+## 15. `2346557` (GQA) - question words became marks
 
-**Question:** What is the dessert that is to the right of the table?
-**Gold:** cupcakes, The dessert is cupcakes.
+**Question:** Are the oranges to the right of the other oranges unpeeled or peeled?
+**Gold:** peeled, The oranges are peeled.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **cupcakes** OK |
-| GoM (outline + IDs + arrows) | **cake** WRONG |
+| raw (clean image) | **peeled** correct |
+| GoM (outline + IDs + arrows) | **unpeeled** wrong |
 
-*Mechanism:* mark-label echo: the model repeats a mark's class word instead of the finer-grained truth
+*Mechanism:* the adjectives from the question are open-vocabulary queries, so the render literally contains `peeled_1`, `peeled_2`, `unpeeled_1` and `unpeeled_2` - the two answer options drawn as labels on arbitrary fruit - and the model picks the wrong one
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_16_2369075_original.jpg) | ![g](flip_examples_paper_gom/v3_16_2369075_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_15_2346557_original.jpg) | ![g](flip_examples_paper_gom/v4_15_2346557_gom.jpg) |
 
-## 17. `2413895` (GQA)
+## 16. `2372647` (GQA) - generic label on the queried object
 
-**Question:** Does the dark cat appear to be standing or lying?
-**Gold:** standing, The cat is standing.
+**Question:** What is the vegetable that is to the left of the sponge?
+**Gold:** lettuce, The vegetable is lettuce.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **standing** OK |
-| GoM (outline + IDs + arrows) | **lying** WRONG |
+| raw (clean image) | **lettuce** correct |
+| GoM (outline + IDs + arrows) | **carrot** wrong |
 
-*Mechanism:* identity/state shift on a marked object
+*Mechanism:* the lettuce carries the generic open-vocabulary label `vegetable_1` while the neighbouring carrots carry specific ones, so the model answers `carrot`
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_17_2413895_original.jpg) | ![g](flip_examples_paper_gom/v3_17_2413895_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_16_2372647_original.jpg) | ![g](flip_examples_paper_gom/v4_16_2372647_gom.jpg) |
 
-## 18. `2404832` (GQA)
+## 17. `713865` (GQA) - mark's class is wrong
 
-**Question:** What kind of furniture is holding the books in the top of the photo?
-**Gold:** bookshelf, The piece of furniture is a bookshelf.
+**Question:** What vehicle is to the left of the vehicle on the sidewalk?
+**Gold:** van, The vehicle is a van.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **bookshelf** OK |
-| GoM (outline + IDs + arrows) | **shelf** WRONG |
+| raw (clean image) | **van** correct |
+| GoM (outline + IDs + arrows) | **bus** wrong |
 
-*Mechanism:* identity/state shift on a marked object
+*Mechanism:* the van in the garage is outlined and labelled `bus_2`; the model reports the label, not the vehicle
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_18_2404832_original.jpg) | ![g](flip_examples_paper_gom/v3_18_2404832_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_17_713865_original.jpg) | ![g](flip_examples_paper_gom/v4_17_713865_gom.jpg) |
 
-## 19. `2375522` (GQA)
+## 18. `2319253` (GQA) - singular/plural
 
-**Question:** Who stands next to the person the window behind of?
-**Gold:** man, The man stands next to the lady.
+**Question:** What type of fruit is to the right of the food on the left side?
+**Gold:** strawberries, The fruits are strawberries.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **man** OK |
-| GoM (outline + IDs + arrows) | **woman** WRONG |
+| raw (clean image) | **Strawberries** correct |
+| GoM (outline + IDs + arrows) | **strawberry** wrong |
 
-*Mechanism:* identity/state shift on a marked object
+*Mechanism:* answers `strawberry` where the gold list has only `strawberries`; the mark labels are singular
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_19_2375522_original.jpg) | ![g](flip_examples_paper_gom/v3_19_2375522_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_18_2319253_original.jpg) | ![g](flip_examples_paper_gom/v4_18_2319253_gom.jpg) |
 
-## 20. `2346478` (GQA)
+## 19. `2378694` (GQA) - model error on a clean render
 
-**Question:** What type of food is to the right of the wine on the left?
-**Gold:** nuts, The food is nuts.
+**Question:** What is the man wearing?
+**Gold:** shorts, The man is wearing shorts.
 
 | condition | model output |
 |---|---|
-| raw (clean image) | **Nuts** OK |
-| GoM (outline + IDs + arrows) | **none** WRONG |
+| raw (clean image) | **shorts** correct |
+| GoM (outline + IDs + arrows) | **wetsuit** wrong |
 
-*Mechanism:* identity/state shift on a marked object
+*Mechanism:* person and surfboard are correctly outlined and nothing is mislabelled; the model simply describes the wetsuit instead of the shorts
 
 | original | GoM render (what the model saw) |
 |---|---|
-| ![o](flip_examples_paper_gom/v3_20_2346478_original.jpg) | ![g](flip_examples_paper_gom/v3_20_2346478_gom.jpg) |
+| ![o](flip_examples_paper_gom/v4_19_2378694_original.jpg) | ![g](flip_examples_paper_gom/v4_19_2378694_gom.jpg) |
+
+## 20. `2380400` (GQA) - question words became marks
+
+**Question:** What is the person in front of the trees throwing?
+**Gold:** frisbee, The man is throwing the frisbee.
+
+| condition | model output |
+|---|---|
+| raw (clean image) | **frisbee** correct |
+| GoM (outline + IDs + arrows) | **ball** wrong |
+
+*Mechanism:* the verb `throwing` became an open-vocabulary query, so the frisbee is outlined as `throwing_1`; with no usable class name the model answers `ball`
+
+| original | GoM render (what the model saw) |
+|---|---|
+| ![o](flip_examples_paper_gom/v4_20_2380400_original.jpg) | ![g](flip_examples_paper_gom/v4_20_2380400_gom.jpg) |
 
 ---
 
-**Scale.** These 20 are a stratified sample of 125 flips in 996 GQA rows; the same
-renders also produce 100+ rescues, so the net effect per model is what `RESULTS.md`
-reports, not this gallery. The dominant remaining mechanism is ID leakage on text-tag
-renders (25 of 125), which the numeric-ID conditions largely avoid (4-5 leaks vs 87-90
-across the full run) - both conditions are evaluated.
+**Scale.** 125 flips in 996 GQA rows, of which these 20 and the 24 shown in earlier
+galleries are a sample; the same renders also produce 100+ rescues, so the net per-model
+effect is what `RESULTS.md` section gom_v3 reports, not this gallery. ID leakage remains
+the largest single mechanism on text-tag renders (25 of 125) and is 20x rarer on the
+numeric-ID conditions (4-5 vs 87-90 across the full run); both are evaluated.

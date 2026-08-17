@@ -90,3 +90,22 @@ def test_person_pronoun_is_a_relation_source():
     assert intent.object_terms == {"person"}
     assert intent.relation_source_terms == {"person"}
     assert intent.relation_terms == {"on_top_of"}
+
+
+def test_question_answer_options_never_become_detector_queries():
+    """Open-vocabulary queries once drew the question's own answer options onto the
+    image ("peeled_1"/"unpeeled_2" on arbitrary fruit) and labelled a frisbee
+    "throwing_1". Marks that spell out candidate answers are worse than no marks."""
+    q = parse_question_intent(
+        "Are the oranges to the right of the other oranges unpeeled or peeled?"
+    ).detector_queries
+    assert "peeled" not in q and "unpeeled" not in q
+    assert "orange" in q
+    q2 = parse_question_intent(
+        "What is the person in front of the trees throwing?"
+    ).detector_queries
+    assert "throwing" not in q2
+    # a real object in the same sentence still survives the filter
+    assert "cheeseburger" in parse_question_intent(
+        "Is the person eating a cheeseburger or a sandwich?"
+    ).detector_queries
