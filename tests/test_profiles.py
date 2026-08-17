@@ -92,3 +92,33 @@ def test_declutter_variant_minimizes_annotations():
     assert cfg.max_relations_per_object == 1
     assert cfg.filter_redundant_relations
     validate_paper_config(cfg)
+
+
+def test_gom_v2_profile_enables_the_audit_fixes():
+    cfg = default_config(profile="gom_v2")
+    assert cfg.profile == "gom_v2"
+    assert not cfg.fill_segmentation
+    assert cfg.targeted_open_vocabulary
+    assert cfg.max_detections_total == 15
+    assert cfg.max_detections_per_label == 4
+    assert cfg.cross_class_suppression
+    assert cfg.enable_mask_quality_filter
+    assert cfg.max_relations_per_object == 1
+    assert cfg.filter_redundant_relations
+    assert cfg.max_picture_area_ratio == 0.95
+    assert cfg.paper_zero_match_top_k == 6
+    assert cfg.relation_selection_policy == "paper_algorithm"
+    validate_paper_config(cfg)  # must stay a no-op for non-locked profiles
+
+
+def test_gom_v3_profile_adds_placement_and_fragment_fixes():
+    cfg = default_config(profile="gom_v3")
+    assert cfg.profile == "gom_v3"
+    assert cfg.deterministic_label_placement
+    assert cfg.measure_text_with_renderer
+    assert cfg.same_class_fragment_containment == 0.70
+    # inherits every gom_v2 fix
+    assert cfg.targeted_open_vocabulary
+    assert not cfg.fill_segmentation
+    assert cfg.max_detections_total == 15
+    assert cfg.paper_zero_match_top_k == 6

@@ -17,6 +17,7 @@ methods to draw annotated images with various combinations of visual elements.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -198,6 +199,12 @@ class VisualizerConfig:
     min_solidity_inside: float = 0.45
     measure_text_with_renderer: bool = True
     avoid_object_occlusion: bool = True
+
+    # Deterministic placement: one pass, hard zero-overlap constraint over object
+    # labels, relation labels and arrows. Replaces the heuristic multi-tier
+    # placement plus adjustText/micro-push passes, which could leave (and did
+    # leave) labels overlapping.
+    deterministic_label_placement: bool = False
     allow_inside_large_objects: bool = True
     large_object_area_ratio: float = 0.04
     large_object_min_side_px: int = 120
@@ -391,13 +398,27 @@ class Visualizer:
         # 3) draw passes
         self._draw_objects(ax, boxes, masks, labels, scores, colors, image)
         avoid_objects = self._build_avoid_patches(ax, boxes) if self.cfg.avoid_object_occlusion else []
-        
-        # Draw object labels first and collect them
-        obj_texts = self._draw_labels(ax, boxes, labels, scores, masks, colors, image, avoid_objects=avoid_objects)
-        
+
+        self._placed_label_bbs = []
+        if self.cfg.deterministic_label_placement:
+            arrow_polylines = (
+                self._predicted_arrow_polylines_px(ax, relations, boxes)
+                if self.cfg.display_relationships
+                else []
+            )
+            obj_texts = self._draw_labels_deterministic(
+                ax, boxes, labels, scores, masks, colors, image,
+                arrow_polylines=arrow_polylines,
+            )
+        else:
+            # Draw object labels first and collect them
+            obj_texts = self._draw_labels(ax, boxes, labels, scores, masks, colors, image, avoid_objects=avoid_objects)
+
         # Draw relationships and avoid object labels
         self._draw_relationships(ax, relations, boxes, colors, obj_texts, avoid_objects=avoid_objects)
-        
+
+        self._record_label_placement(fig)
+
         self._draw_legend(ax, labels, colors)
 
         # 4) finalize
@@ -938,7 +959,7 @@ class Visualizer:
                 linewidth=cfg.rel_arrow_linewidth,
                 connectionstyle=f"arc3,rad={curvature}",
                 mutation_scale=cfg.rel_arrow_mutation_scale,
-                zorder=8,
+                zorder=6.5,  # below object ID labels (7): arrows must not obscure them
             )
             arrow.set_path_effects(
                 [
@@ -951,6 +972,17 @@ class Visualizer:
             )
             ax.add_patch(arrow)
             arrow_patches.append(arrow)
+
+            if cfg.display_relation_labels and cfg.deterministic_label_placement:
+                readable = self._humanize_relation(relation_name)
+                t = self._place_relation_label_deterministic(
+                    ax, readable, p0, p1, color
+                )
+                if t is not None:
+                    rel_texts.append(t)
+                    rel_label_anchors.append(t.get_position())
+                    rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
+                continue
 
             if cfg.display_relation_labels:
                 readable = self._humanize_relation(relation_name)
@@ -1013,8 +1045,11 @@ class Visualizer:
                 rel_label_anchors.append(pos)
                 rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
 
-        # Resolve overlaps between relationship labels, avoiding object labels
-        if cfg.resolve_overlaps and rel_texts:
+        # Resolve overlaps between relationship labels, avoiding object labels.
+        # Skipped under deterministic placement: every label already sits in a
+        # verified-clear seat, and these passes are exactly what used to move a
+        # resolved label back on top of another one.
+        if cfg.resolve_overlaps and rel_texts and not cfg.deterministic_label_placement:
             fig = ax.figure
             fig.canvas.draw()
             # Pass object_texts as fixed_texts to avoid overlapping them
@@ -1092,6 +1127,396 @@ class Visualizer:
     # ===========================================================
     # OBJECT LABEL PLACEMENT
     # ===========================================================
+    # ===========================================================
+    # DETERMINISTIC LABEL PLACEMENT
+    # ===========================================================
+
+    def _record_label_placement(self, fig) -> None:
+        """Expose the placed-label boxes and their overlap count on the figure.
+
+        The preprocessor copies the count into the per-image render metadata, which
+        is what makes "this whole run is overlap-free" a checkable claim instead of
+        an impression from a handful of eyeballed renders.
+        """
+        boxes = list(getattr(self, "_placed_label_bbs", []) or [])
+        overlaps = 0
+        for a in range(len(boxes)):
+            for b in range(a + 1, len(boxes)):
+                if boxes[a].overlaps(boxes[b]):
+                    ix = min(boxes[a].x1, boxes[b].x1) - max(boxes[a].x0, boxes[b].x0)
+                    iy = min(boxes[a].y1, boxes[b].y1) - max(boxes[a].y0, boxes[b].y0)
+                    if ix > 0.5 and iy > 0.5:
+                        overlaps += 1
+        fig._gom_label_boxes = [tuple(bb.extents) for bb in boxes]
+        fig._gom_label_overlap_count = overlaps
+
+    @staticmethod
+    def _arc3_polyline(
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        rad: float,
+        samples: int = 24,
+    ) -> List[Tuple[float, float]]:
+        """Sample matplotlib's arc3 connection as a polyline (same control point)."""
+        x1, y1 = start
+        x2, y2 = end
+        cx = (x1 + x2) / 2.0 + rad * (y2 - y1)
+        cy = (y1 + y2) / 2.0 - rad * (x2 - x1)
+        points = []
+        for step in range(samples + 1):
+            t = step / samples
+            u = 1.0 - t
+            points.append(
+                (
+                    u * u * x1 + 2 * u * t * cx + t * t * x2,
+                    u * u * y1 + 2 * u * t * cy + t * t * y2,
+                )
+            )
+        return points
+
+    def _predicted_arrow_polylines_px(
+        self,
+        ax: plt.Axes,
+        relationships: Sequence[Dict[str, Any]],
+        boxes: Sequence[Sequence[float]],
+    ) -> List[List[Tuple[float, float]]]:
+        """Arrow paths in display px, computed BEFORE any arrow patch exists.
+
+        Object labels are placed before `_draw_relationships` runs, so the only way
+        they can avoid arrows is to predict them. The geometry is deterministic:
+        bbox centers plus the same curvature rule the drawing code uses.
+        """
+        if not relationships:
+            return []
+        centers = [
+            ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
+            for b in boxes
+        ]
+        counts: Dict[Tuple[int, int], int] = {}
+        polylines: List[List[Tuple[float, float]]] = []
+        for rel in relationships:
+            try:
+                src, tgt = int(rel["src_idx"]), int(rel["tgt_idx"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (0 <= src < len(centers) and 0 <= tgt < len(centers)):
+                continue
+            counts[(src, tgt)] = counts.get((src, tgt), 0) + 1
+            rad = 0.2 + 0.1 * (counts[(src, tgt)] - 1)
+            data_pts = self._arc3_polyline(centers[src], centers[tgt], rad)
+            polylines.append([tuple(p) for p in ax.transData.transform(data_pts)])
+        return polylines
+
+    @staticmethod
+    def _bbox_crosses_polyline(bb, polyline: Sequence[Tuple[float, float]]) -> bool:
+        for px, py in polyline:
+            if bb.x0 <= px <= bb.x1 and bb.y0 <= py <= bb.y1:
+                return True
+        return False
+
+    def _registry_overlap(self, bb) -> float:
+        """Total overlap area of bb against every already-placed label box."""
+        total = 0.0
+        for other in self._placed_label_bbs:
+            if bb.overlaps(other):
+                ix = min(bb.x1, other.x1) - max(bb.x0, other.x0)
+                iy = min(bb.y1, other.y1) - max(bb.y0, other.y0)
+                total += max(0.0, ix) * max(0.0, iy)
+        return total
+
+    def _draw_labels_deterministic(
+        self,
+        ax: plt.Axes,
+        boxes: Sequence[Sequence[float]],
+        labels: Sequence[str],
+        scores: Sequence[float],
+        masks: Optional[Sequence[np.ndarray | Dict[str, Any]]],
+        colors: Sequence[str],
+        image: Image.Image,
+        *,
+        arrow_polylines: Sequence[Sequence[Tuple[float, float]]] = (),
+    ) -> List[Any]:
+        """Place every object label in one pass with a hard no-overlap constraint.
+
+        Order is largest object first so big objects claim the inside/near seats and
+        small ones take the leftovers; ties break on index, so the result is
+        deterministic. A label that cannot find a clear seat among the ranked
+        candidates spirals outward until it finds one, keeping a leader line to its
+        own object. Nothing moves after placement.
+        """
+        cfg = self.cfg
+        if not cfg.display_labels:
+            return []
+
+        W, H = image.size
+        fig = ax.figure
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        to_px = ax.transData.transform
+        canvas_w, canvas_h = fig.canvas.get_width_height()
+
+        # Object bodies are soft obstacles: covering a different object is worse
+        # than sitting on empty background, but never as bad as covering a label.
+        object_bbs = []
+        for box in boxes:
+            (bx0, by0), (bx1, by1) = to_px((box[0], box[1])), to_px((box[2], box[3]))
+            object_bbs.append(
+                Bbox.from_extents(min(bx0, bx1), min(by0, by1), max(bx0, bx1), max(by0, by1))
+            )
+
+        placed_texts: List[Any] = []
+        order = sorted(
+            range(len(boxes)),
+            key=lambda i: (
+                -(float(boxes[i][2]) - float(boxes[i][0]))
+                * (float(boxes[i][3]) - float(boxes[i][1])),
+                i,
+            ),
+        )
+
+        for i in order:
+            color = colors[i]
+            box = boxes[i]
+            x1, y1, x2, y2 = (float(v) for v in box[:4])
+            label_text = self._format_label_text(labels[i], scores[i], obj_index=i)
+            mask_info = self._get_mask_for_index(i, masks)
+
+            w_txt, h_txt = self._estimate_text_px(ax, label_text, cfg.obj_fontsize_outside)
+            pad = 6.0
+            box_w_px, box_h_px = w_txt + 2 * pad, h_txt + 2 * pad
+            anchor_px = to_px(((x1 + x2) / 2.0, (y1 + y2) / 2.0))
+
+            candidates: List[Tuple[Tuple[float, float], str, str, bool]] = []
+            # 1) inside the object, when it is big and solid enough to host the label
+            allow_inside = self._can_draw_label_inside(
+                image, box, mask_info, label_text, ax
+            )
+            if cfg.avoid_object_occlusion:
+                allow_inside = (
+                    allow_inside
+                    and cfg.allow_inside_large_objects
+                    and self._is_large_object(image, box)
+                )
+            if allow_inside:
+                candidates.append((((x1 + x2) / 2.0, (y1 + y2) / 2.0), "center", "center", True))
+
+            # 2) ring of outside seats: below / above / right / left, each with
+            #    lateral variants, ordered nearest-first.
+            gap = max(4.0, h_txt * 0.25)
+            gap_x = self._pixels_to_data(ax, gap, 0)[0]
+            gap_y = self._pixels_to_data(ax, 0, gap)[1]
+            mid_x, mid_y = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            lat_x = [mid_x, x1, x2]
+            lat_y = [mid_y, y1, y2]
+            for lx in lat_x:
+                candidates.append(((lx, y2 + gap_y), "center", "top", False))
+                candidates.append(((lx, y1 - gap_y), "center", "bottom", False))
+            for ly in lat_y:
+                candidates.append(((x2 + gap_x, ly), "left", "center", False))
+                candidates.append(((x1 - gap_x, ly), "right", "center", False))
+
+            best = None
+            for pos, ha, va, is_inside in candidates:
+                bb = self._label_bbox_px(ax, pos, box_w_px, box_h_px, ha=ha, va=va)
+                if self._registry_overlap(bb) > 0.0:
+                    continue  # hard constraint: never overlap another label
+                if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
+                    continue
+                crosses = any(
+                    self._bbox_crosses_polyline(bb, poly) for poly in arrow_polylines
+                )
+                foreign = sum(
+                    1
+                    for j, obb in enumerate(object_bbs)
+                    if j != i and bb.overlaps(obb)
+                )
+                centre = ((bb.x0 + bb.x1) / 2.0, (bb.y0 + bb.y1) / 2.0)
+                dist = math.hypot(centre[0] - anchor_px[0], centre[1] - anchor_px[1])
+                score = (0 if is_inside else 1, int(crosses), foreign, dist)
+                if best is None or score < best[0]:
+                    best = (score, pos, ha, va, bb, is_inside)
+
+            if best is None:
+                # Every ranked seat is taken: spiral outward from the object until a
+                # clear, in-canvas seat appears. Guaranteed to terminate.
+                step = max(box_h_px, 14.0)
+                found = None
+                for ring in range(1, 40):
+                    for angle_i in range(12):
+                        ang = angle_i * math.pi / 6.0
+                        dx_px = math.cos(ang) * step * ring
+                        dy_px = math.sin(ang) * step * ring
+                        pos = (
+                            mid_x + self._pixels_to_data(ax, dx_px, 0)[0],
+                            mid_y + self._pixels_to_data(ax, 0, dy_px)[1],
+                        )
+                        bb = self._label_bbox_px(
+                            ax, pos, box_w_px, box_h_px, ha="center", va="center"
+                        )
+                        if self._registry_overlap(bb) > 0.0:
+                            continue
+                        if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
+                            continue
+                        found = (pos, bb)
+                        break
+                    if found:
+                        break
+                if found is None:
+                    continue  # nowhere on the canvas is free; drop the label
+                best = ((2, 0, 0, 0.0), found[0], "center", "center", found[1], False)
+
+            _, pos, ha, va, bb, is_inside = best
+            fontsize = cfg.obj_fontsize_inside if is_inside else cfg.obj_fontsize_outside
+            text = ax.text(
+                pos[0],
+                pos[1],
+                label_text,
+                ha=ha,
+                va=va,
+                fontsize=fontsize,
+                fontfamily=cfg.font_family,
+                color=text_color_for_bg(color),
+                bbox=dict(
+                    facecolor=color,
+                    alpha=0.95,
+                    edgecolor=color,
+                    linewidth=cfg.label_bbox_linewidth,
+                    boxstyle="round,pad=0.25",
+                ),
+                zorder=7,
+            )
+            text._gom_inside_label = is_inside
+            placed_texts.append(text)
+            self._placed_label_bbs.append(bb)
+
+            # Leader line whenever the label had to sit away from its object.
+            if not is_inside:
+                centre = ((bb.x0 + bb.x1) / 2.0, (bb.y0 + bb.y1) / 2.0)
+                if math.hypot(centre[0] - anchor_px[0], centre[1] - anchor_px[1]) > max(
+                    box_h_px * 1.5, 30.0
+                ):
+                    ax.annotate(
+                        "",
+                        xy=(mid_x, mid_y),
+                        xytext=pos,
+                        arrowprops=dict(
+                            arrowstyle="-",
+                            color="gray",
+                            alpha=0.5,
+                            shrinkA=2,
+                            shrinkB=2,
+                            linewidth=1.0,
+                        ),
+                        zorder=6,
+                    )
+        return placed_texts
+
+    def _place_relation_label_deterministic(
+        self,
+        ax: plt.Axes,
+        text: str,
+        p0: Tuple[float, float],
+        p1: Tuple[float, float],
+        color: str,
+    ):
+        """Seat a relation label on its own arrow without overlapping any label.
+
+        Candidates walk along the arrow (so the label stays attached to the relation
+        it names) and step off along the normal. The registry already holds every
+        object label and every relation label placed so far, so the first clear
+        candidate is collision-free by construction.
+        """
+        cfg = self.cfg
+        fig = ax.figure
+        canvas_w, canvas_h = fig.canvas.get_width_height()
+        to_px = ax.transData.transform
+        to_data = ax.transData.inverted().transform
+
+        w_txt, h_txt = self._estimate_text_px(ax, text, cfg.rel_fontsize)
+        pad = 5.0
+        w_px, h_px = w_txt + 2 * pad, h_txt + 2 * pad
+
+        a_px, b_px = np.array(to_px(p0)), np.array(to_px(p1))
+        v = b_px - a_px
+        length = float(np.hypot(v[0], v[1])) or 1.0
+        normal = np.array([-v[1], v[0]]) / length
+
+        chosen = None
+        for t_along in (0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78):
+            base = a_px + v * t_along
+            for magnitude in (0.0, 12.0, 20.0, 30.0, 42.0, 56.0, 72.0):
+                for sign in ((1.0, -1.0) if magnitude else (1.0,)):
+                    centre = base + normal * magnitude * sign
+                    bb = Bbox.from_extents(
+                        centre[0] - w_px / 2.0,
+                        centre[1] - h_px / 2.0,
+                        centre[0] + w_px / 2.0,
+                        centre[1] + h_px / 2.0,
+                    )
+                    if self._registry_overlap(bb) > 0.0:
+                        continue
+                    if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
+                        continue
+                    chosen = (centre, bb)
+                    break
+                if chosen:
+                    break
+            if chosen:
+                break
+
+        if chosen is None:
+            return None  # no clear seat: drawing it would create the overlap we forbid
+
+        centre, bb = chosen
+        pos = tuple(to_data(centre))
+        label = ax.text(
+            pos[0],
+            pos[1],
+            text,
+            fontsize=cfg.rel_fontsize,
+            fontfamily=cfg.font_family,
+            ha="center",
+            va="center",
+            color="black",
+            bbox=dict(
+                boxstyle="round,pad=0.25",
+                facecolor="white",
+                alpha=0.95,
+                edgecolor=color,
+                linewidth=cfg.relation_label_bbox_linewidth,
+            ),
+            zorder=9,
+        )
+        self._placed_label_bbs.append(bb)
+        return label
+
+    def _label_bbox_px(
+        self,
+        ax: plt.Axes,
+        pos: Tuple[float, float],
+        w_px: float,
+        h_px: float,
+        *,
+        ha: str,
+        va: str,
+    ):
+        """Display-space box a label drawn at pos with this alignment will occupy."""
+        cx, cy = ax.transData.transform(pos)
+        if ha == "center":
+            x0, x1 = cx - w_px / 2.0, cx + w_px / 2.0
+        elif ha == "left":
+            x0, x1 = cx, cx + w_px
+        else:
+            x0, x1 = cx - w_px, cx
+        # display y grows upward, data y grows downward on an image axis
+        if va == "center":
+            y0, y1 = cy - h_px / 2.0, cy + h_px / 2.0
+        elif va == "top":  # text below the anchor point
+            y0, y1 = cy - h_px, cy
+        else:  # "bottom": text above the anchor point
+            y0, y1 = cy, cy + h_px
+        return Bbox.from_extents(x0, y0, x1, y1)
+
     def _draw_labels(
         self,
         ax: plt.Axes,
@@ -1321,6 +1746,8 @@ class Visualizer:
                     zorder=7,
                 )
                 batch_out_specs.append((border_x, border_pos[1], max_dist_px))
+                if bb is not None:
+                    placed_bbs.append(bb)  # later labels must avoid this one too
             else:
                 t = ax.text(
                     border_pos[0],

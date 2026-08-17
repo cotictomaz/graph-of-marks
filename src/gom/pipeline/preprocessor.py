@@ -511,6 +511,8 @@ class PreprocessorConfig:
     paper_close_threshold: float = 0.12
     paper_fasttext_path: Optional[str] = None
     paper_require_fasttext: bool = False
+    paper_zero_match_top_k: int = 0  # 0 = published keep-all on zero query matches
+    same_class_fragment_containment: float = 0.0  # 0 disables part-of-object dedup
     threshold_object_similarity: float = 0.50  # Min CLIP similarity for object filtering
     threshold_relation_similarity: float = 0.50  # Min CLIP similarity for relation filtering
     singleton_max_target_distance_ratio: float = 0.6  # Max target-object distance ratio (diag) in singleton mode
@@ -911,6 +913,9 @@ class ImageGraphPreprocessor:
                 resolve_overlaps=self.cfg.resolve_overlaps,
                 color_sat_boost=self.cfg.color_sat_boost,
                 color_val_boost=self.cfg.color_val_boost,
+                deterministic_label_placement=getattr(
+                    self.cfg, "deterministic_label_placement", False
+                ),
             )
         )
 
@@ -2332,8 +2337,8 @@ class ImageGraphPreprocessor:
                 removal_reasons[i] = "no_segmentation"
                 continue
             
-            # Check background classes
-            if label.lower() in background_classes:
+            # Check background classes (labels carry _N suffixes here, e.g. grass_1)
+            if base_label(label).replace("_", " ").lower() in background_classes:
                 removed_count += 1
                 removal_reasons[i] = f"background_class({label})"
                 self.logger.debug(f"   🗑️  Filtering {label} (background class)")
@@ -2447,6 +2452,7 @@ class ImageGraphPreprocessor:
         cross_class_score_diff_threshold: float = 0.80,
         target_indices: Optional[Set[int]] = None,
         cross_class: bool = True,
+        same_class_fragment_containment: float = 0.0,
     ) -> Tuple[List, List, List, Optional[List], Optional[List], List[int]]:
         """
         Remove highly overlapping objects (both same-class and cross-class).
@@ -2514,6 +2520,22 @@ class ImageGraphPreprocessor:
             except Exception:
                 return 0.0
         
+        def compute_mask_containment(inner, outer):
+            """Fraction of `inner`'s mask that lies inside `outer`'s mask."""
+            if inner is None or outer is None:
+                return 0.0
+            try:
+                seg_in = inner.get('segmentation') if isinstance(inner, dict) else inner
+                seg_out = outer.get('segmentation') if isinstance(outer, dict) else outer
+                if seg_in is None or seg_out is None:
+                    return 0.0
+                area = np.asarray(seg_in).sum()
+                if area <= 0:
+                    return 0.0
+                return float(np.logical_and(seg_in, seg_out).sum() / area)
+            except Exception:
+                return 0.0
+
         # Track which indices to keep
         keep = set(range(len(boxes)))
         removed_count = 0
@@ -2540,9 +2562,35 @@ class ImageGraphPreprocessor:
                 mask_overlap = 0.0
                 if masks and i < len(masks) and j < len(masks):
                     mask_overlap = compute_mask_iou(masks[i], masks[j])
+                # Part-of-object fragment: a same-class box sitting inside a bigger
+                # one whose MASK is also inside the bigger mask is a piece of that
+                # object (an elephant's leg detected as "elephant"), not a second
+                # instance. Two adjacent instances fail the mask test - SAM gives
+                # them disjoint masks - so they both survive.
+                fragment_threshold = float(same_class_fragment_containment)
+                is_fragment = False
+                fragment_smaller = None
+                if (
+                    same_class
+                    and fragment_threshold > 0.0
+                    and box_iou > 0.0
+                    and masks
+                    and i < len(masks)
+                    and j < len(masks)
+                ):
+                    # Whichever mask lies inside the other is the part. Box
+                    # containment is not the test: a leg's box can stick out past
+                    # the body's box while its mask is entirely within the body.
+                    c_i = compute_mask_containment(masks[i], masks[j])
+                    c_j = compute_mask_containment(masks[j], masks[i])
+                    if max(c_i, c_j) >= fragment_threshold:
+                        is_fragment = True
+                        fragment_smaller = i if c_i >= c_j else j
+
                 same_class_duplicate = same_class and (
                     box_iou >= iou_threshold
                     or mask_overlap >= same_class_mask_iou_threshold
+                    or is_fragment
                     or (
                         enable_containment_removal
                         and
@@ -2567,6 +2615,15 @@ class ImageGraphPreprocessor:
                     elif i_is_target and j_is_target:
                         # Both are targets -> keep both (don't remove)
                         continue
+                    elif is_fragment and fragment_smaller is not None:
+                        # Keep the whole object, drop the part - regardless of score.
+                        smaller = fragment_smaller
+                        larger = j if smaller == i else i
+                        keep.discard(smaller)
+                        removed_count += 1
+                        print(f"  [DEDUP] Removed {labels[smaller]} (fragment of {labels[larger]})")
+                        if smaller == i:
+                            break
                     elif scores[i] >= scores[j]:
                         keep.discard(j)
                         removed_count += 1
@@ -3930,6 +3987,9 @@ class ImageGraphPreprocessor:
                     cross_class_score_diff_threshold=getattr(self.cfg, 'cross_class_score_diff_threshold', 0.80),
                     target_indices=current_target_indices,  # Protect targets in singleton mode
                     cross_class=bool(getattr(self.cfg, 'cross_class_suppression', False)),
+                    same_class_fragment_containment=float(
+                        getattr(self.cfg, 'same_class_fragment_containment', 0.0)
+                    ),
                 )
             else:
                 kept_overlap = list(range(len(boxes)))
@@ -4190,6 +4250,9 @@ class ImageGraphPreprocessor:
                     top_k_per_head=int(self.cfg.max_relations_per_object),
                 ),
                 semantic_similarity=fasttext if fasttext.available else None,
+                boxes=boxes,
+                scores=scores,
+                zero_match_top_k=int(getattr(self.cfg, "paper_zero_match_top_k", 0)),
             )
             boxes = [boxes[index] for index in kept_indices]
             labels = [labels[index] for index in kept_indices]
@@ -4650,7 +4713,7 @@ class ImageGraphPreprocessor:
             variant_dir = Path(self.cfg.output_folder) / "renders" / str(name)
             variant_dir.mkdir(parents=True, exist_ok=True)
             output_path = variant_dir / f"{image_name}_output.{extension}"
-            visualizer.draw(
+            variant_fig, _ = visualizer.draw(
                 image=image,
                 boxes=boxes,
                 labels=self._format_labels_for_mode(labels, label_mode),
@@ -4661,7 +4724,9 @@ class ImageGraphPreprocessor:
                 draw_background=draw_background,
                 bg_color=(1, 1, 1, 0),
             )
+            label_overlaps = getattr(variant_fig, "_gom_label_overlap_count", None)
             metadata[str(name)] = {
+                "label_overlap_count": label_overlaps,
                 "output_path": output_path.as_posix(),
                 "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
                 "effective_style": visualizer.effective_style(image.size),

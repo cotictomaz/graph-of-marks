@@ -258,6 +258,11 @@ def main() -> int:
         default="",
         help="Comma-separated extra conditions beyond paper_spec (e.g. text_graph).",
     )
+    parser.add_argument(
+        "--conditions",
+        default="",
+        help="Comma-separated subset of paper_spec conditions to score (default: all).",
+    )
     args = parser.parse_args()
     spec = load_yaml(PAPER_SPEC)
     datasets = [value.strip() for value in args.datasets.split(",") if value.strip()]
@@ -283,7 +288,16 @@ def main() -> int:
             if args.question_filter == "appearance" and dataset != "refcocog":
                 keep = keep_ids(rows)
             extra = [v.strip() for v in args.extra_conditions.split(",") if v.strip()]
-            for condition in list(spec["conditions"]) + extra:
+            spec_conditions = list(spec["conditions"])
+            if args.conditions:
+                requested = [v.strip() for v in args.conditions.split(",") if v.strip()]
+                unknown = sorted(set(requested) - set(spec["conditions"]))
+                if unknown:
+                    raise SystemExit(
+                        f"Unknown conditions {unknown}; paper_spec has {sorted(spec['conditions'])}"
+                    )
+                spec_conditions = requested
+            for condition in spec_conditions + extra:
                 if dataset == "refcocog" and condition in {"raw", "segmented", "text_graph"}:
                     continue
                 run_scores = []

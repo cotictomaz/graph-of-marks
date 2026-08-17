@@ -133,6 +133,40 @@ _ATTRIBUTE_WORDS = {
 
 _PERSON_PRONOUNS = {"he", "her", "hers", "him", "his", "she"}
 
+# Words that survive the stopword/attribute filters but are not visual objects.
+# Only used to keep open-vocabulary detector queries clean; the closed-set
+# anchors above are unaffected.
+_META_WORDS = {
+    # scene/meta nouns
+    "photo", "photograph", "image", "picture", "pic", "scene", "shot", "view",
+    "side", "sides", "part", "parts", "piece", "top", "bottom", "edge", "corner",
+    "background", "foreground", "center", "centre", "middle", "place", "area",
+    "position", "row", "line", "group", "pair", "half", "end", "front", "back",
+    # question verbs / auxiliaries
+    "see", "seen", "appear", "appears", "look", "looks", "looking", "seem",
+    "seems", "show", "shows", "shown", "showing", "contain", "contains", "use",
+    "used", "using", "made", "make", "makes", "eat", "eats", "eating", "drink",
+    "drinking", "ride", "riding", "play", "playing", "watch", "watching",
+    "carry", "carrying", "call", "called", "put", "placed", "located", "visible",
+    # quantifiers / determiners / adjectives
+    "any", "some", "all", "both", "either", "neither", "other", "another",
+    "same", "different", "one", "two", "three", "four", "five", "six", "seven",
+    "eight", "nine", "ten", "first", "second", "third", "last", "next", "least",
+    "small", "smaller", "smallest", "large", "larger", "largest", "big",
+    "bigger", "biggest", "little", "tall", "taller", "short", "shorter", "long",
+    "longer", "dark", "darker", "light", "lighter", "bright", "old", "older",
+    "young", "younger", "new", "antique", "open", "closed", "empty", "full",
+    "clean", "dirty", "wet", "dry", "hot", "cold", "far", "close", "closer",
+    "very", "quite", "really", "just", "also", "not", "no", "yes", "than",
+    "if", "so", "as", "but", "while", "about", "into", "onto", "off", "out",
+    "indoors", "outdoors", "indoor", "outdoor", "daytime", "nighttime",
+    "up", "down", "here", "now", "then", "get", "got", "give", "given",
+    # bare direction words (relation phrases are stripped separately, but these
+    # also occur standalone: "to the left or to the right of ...")
+    "left", "right", "above", "below", "under", "over", "behind", "beside",
+    "upper", "lower", "leftmost", "rightmost",
+}
+
 
 def canonical_object_label(label: str) -> str:
     value = re.sub(r"[_-]+", " ", str(label).strip().lower())
@@ -140,6 +174,10 @@ def canonical_object_label(label: str) -> str:
     value = _COMPOUND_ALIASES.get(value, _ALIASES.get(value, value))
     if value.endswith("ies") and f"{value[:-3]}y" in _VISUAL_OBJECTS:
         return f"{value[:-3]}y"
+    if value.endswith("ves"):
+        for singular in (f"{value[:-3]}f", f"{value[:-3]}fe"):
+            if singular in _VISUAL_OBJECTS:
+                return singular
     if value.endswith("es") and value[:-2] in _VISUAL_OBJECTS:
         return value[:-2]
     if value.endswith("s") and value[:-1] in _VISUAL_OBJECTS:
@@ -158,6 +196,7 @@ class QuestionIntent:
     target_categories: FrozenSet[str]
     relation_terms: FrozenSet[str]
     detector_queries: Tuple[str, ...]
+    open_terms: Tuple[str, ...] = ()
 
     @property
     def needs_depth(self) -> bool:
@@ -245,7 +284,50 @@ def parse_question_intent(question: str) -> QuestionIntent:
             anchors.add(canonical)
 
     expanded = [member for category in sorted(categories) for member in _CATEGORY_MEMBERS[category]]
-    queries = _ordered_unique([*sorted(anchors), *sorted(categories), *expanded, *compounds])
+
+    # Open-vocabulary queries: content nouns the closed visual ontology does not
+    # know ("cheeseburger", "van", "towel", "guitar"). Without these the object a
+    # question is *about* is often never detected, so Algorithm 3 marks unrelated
+    # objects instead. The queries are only handed to the open-vocabulary detector
+    # (OWLv2), which scores them against the image, so a non-object word simply
+    # returns nothing above threshold.
+    covered = set(anchors) | set(categories) | set(expanded)
+    covered |= {word for phrase in compounds for word in phrase.split()}
+    open_candidates = [
+        token
+        for token in tokens
+        if len(token) > 2
+        and token not in _STOPWORDS
+        and token not in _ATTRIBUTE_WORDS
+        and token not in relation_words
+        and token not in _META_WORDS
+        and token not in covered
+        and canonical_object_label(token) not in covered
+        and canonical_object_label(token) not in _VISUAL_OBJECTS
+    ]
+    # A modifier followed by a head noun becomes a phrase query ("teddy bear",
+    # "toy car"): the head may be a known visual object, which is exactly the
+    # case where the bare modifier alone would be a useless query.
+    open_bigrams = []
+    modifiers = set()
+    for left, right in zip(tokens, tokens[1:]):
+        if left in open_candidates and (
+            right in open_candidates or canonical_object_label(right) in covered
+        ):
+            open_bigrams.append(f"{left} {canonical_object_label(right)}")
+            # "creamy"/"teddy" alone are useless detector queries; the phrase carries
+            # the meaning, so the modifier is not emitted on its own.
+            modifiers.add(left)
+    open_terms = _ordered_unique(
+        [*open_bigrams, *(t for t in open_candidates if t not in modifiers)]
+    )[:8]
+
+    # Bare category words are dropped from the detector queries: OWLv2 labels a
+    # detection with the query string, so querying "animal" yields marks labelled
+    # "animal_1" instead of "cow_1". The category's members are queried instead.
+    queries = _ordered_unique(
+        [*sorted(anchors), *expanded, *compounds, *open_terms]
+    )
     object_terms = frozenset(set(anchors) | set(categories) | set(expanded))
 
     relation_anchors = set()
@@ -289,6 +371,7 @@ def parse_question_intent(question: str) -> QuestionIntent:
         target_categories=frozenset(categories),
         relation_terms=_relations(q),
         detector_queries=queries,
+        open_terms=open_terms,
     )
 
 

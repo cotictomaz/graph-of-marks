@@ -36,6 +36,31 @@ def test_filtering_is_strictly_narrower_than_no_question():
     assert len(with_query) < len(without_query)
 
 
+def test_zero_match_top_k_bounds_the_degenerate_branch():
+    """The mark-storm fix: unmatchable query -> a few salient marks, not all."""
+    boxes = [[0, 0, 10 * (i + 1), 10 * (i + 1)] for i in range(len(LABELS))]
+    scores = [1.0] * len(LABELS)
+    kept, _ = filter_paper_graph(
+        LABELS,
+        RELATIONS,
+        question="Is there a zebra?",
+        boxes=boxes,
+        scores=scores,
+        zero_match_top_k=2,
+    )
+    assert kept == [6, 7], "equal scores: the two largest boxes win"
+    default_kept, _ = filter_paper_graph(LABELS, RELATIONS, question="Is there a zebra?")
+    assert len(default_kept) == len(LABELS), "published keep-all stays the default"
+
+
+def test_plural_question_matches_singular_label():
+    """'shelves' in the question must match a detected 'shelf'."""
+    kept, _ = filter_paper_graph(
+        ["shelf", "bottle"], [], question="On which side are the shelves?"
+    )
+    assert kept == [0]
+
+
 def test_single_match_keeps_its_neighbours():
     kept, edges = filter_paper_graph(LABELS, RELATIONS, question="Where is the car?")
     assert LABELS.index("car") in kept

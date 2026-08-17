@@ -12,6 +12,9 @@ PROMPT_PROFILES = (
     "visual_aid_concise",
     "relation_explicit_concise",
     "direct_concise",
+    "gom_v2_concise",
+    "gom_v3_concise",
+    "gom_v3b_concise",
 )
 
 SYSTEM_RAW = "You are a helpful visual assistant."
@@ -73,6 +76,68 @@ _CONCISE_INSTRUCTIONS = (
     "Answer using a single word or phrase.",
 )
 
+# gom_v2_concise: the flip-case audit showed marked-condition answers leaking the
+# annotation vocabulary ("person_1", "Right of", "green"). This profile explains
+# the marks once, demotes them to optional aids, and bans them as answers. Raw is
+# byte-identical to direct_concise so raw predictions stay comparable across runs.
+SYSTEM_GOM_V2 = (
+    "You are a helpful visual assistant. The photograph has been annotated: "
+    "colored outlines mark detected objects, tags such as person_1 or bare "
+    "numbers are object reference IDs, and labeled arrows show spatial "
+    "relations between the outlined objects. The annotations are hints, not "
+    "part of the scene; if they conflict with what the photograph shows, trust "
+    "the photograph. Answer about the photograph itself, in plain natural "
+    "language. Never use a reference ID as an answer: if asked who someone is, "
+    "say what you see, such as woman, man, or boy - never person_1 or a "
+    "number. Never use an arrow's relation word as an answer: if asked where "
+    "something is, name the place in the photograph, such as on the ground or "
+    "in the car - never above or below alone. Never answer with the color of "
+    "an outline."
+)
+USER_GOM_V2 = "Question: {question}\n" + DIRECT_ANSWER_INSTRUCTION
+
+# gom_v3_concise: the flip audit (reproduction/FLIP_AUDIT_GOM_V2.md) showed the
+# v2 wording ban was not enough on its own - Qwen and LlamaV still answered
+# "person_1" to "who ...?" questions (83/2975), and marked scenes still drew
+# yes->no existence denials. This profile keeps the v2 explanation, adds an
+# explicit presence assertion, and shows the behaviour instead of only naming it.
+SYSTEM_GOM_V3 = (
+    "You are a helpful visual assistant. The photograph has been annotated: "
+    "colored outlines mark detected objects, tags such as person_1 or bare "
+    "numbers are object reference IDs, and labeled arrows show spatial "
+    "relations between the outlined objects. The annotations are hints, not "
+    "part of the scene; if they conflict with what the photograph shows, trust "
+    "the photograph. Every outlined object is really present in the "
+    "photograph, and objects with no outline are present too - the marks cover "
+    "only some of the scene.\n"
+    "Answer about the photograph itself, in plain natural language. Never "
+    "answer with a reference ID, an arrow's relation word, or the color of an "
+    "outline. For example:\n"
+    "Q: Who is wearing a jacket? A: woman   (never person_1)\n"
+    "Q: Are there any benches near the sidewalk? A: yes\n"
+    "Q: Where is the dog? A: in the car   (never above or below)"
+)
+# Measured on the audit set: repeating the ban in the user turn as well cut
+# Qwen's text-tag leaks only 13->12 while costing Gemma 8-10 accuracy points, so
+# the user turn stays the plain direct instruction. Text-tag ID leakage on "who"
+# questions is a model behaviour we cannot prompt away; the numeric-ID
+# conditions (1-3 leaks vs 12-14) are the mitigation and both run in the eval.
+USER_GOM_V3 = USER_GOM_V2
+
+# gom_v3b_concise: same intent as v3, positive framing only. Measured on
+# data_v6: v3's explicit bans ("never person_1", "never above or below") RAISED
+# the very answers they forbid - Gemma's bare-relation-word answers went 1 -> 31
+# and LlamaV's plan-mode came back - because naming a token in a prohibition
+# also makes it available. This version never prints a forbidden token.
+SYSTEM_GOM_V3B = (
+    "You are a helpful visual assistant. The photograph has been annotated with "
+    "colored outlines around detected objects, short tags naming them, and "
+    "arrows showing how those objects are arranged. The annotations are hints "
+    "added on top; the photograph itself is the evidence, and it also contains "
+    "things that were not annotated. Answer the question about the photograph, "
+    "using the ordinary everyday word for what you see."
+)
+
 
 def _directify(user: str) -> str:
     for sentence in _CONCISE_INSTRUCTIONS:
@@ -100,9 +165,32 @@ def build_vqa_prompt(
 
     if mode == "raw" or profile == "neutral_concise":
         user = USER_RAW.format(question=question)
-        if profile == "direct_concise":
+        if profile in {
+            "direct_concise",
+            "gom_v2_concise",
+            "gom_v3_concise",
+            "gom_v3b_concise",
+        }:
             user = _directify(user)
         return SYSTEM_RAW, user
+
+    if profile in {"gom_v2_concise", "gom_v3_concise", "gom_v3b_concise"}:
+        if mode == "visual_textual":
+            # text_graph sends a clean image + triples: the mark explanation
+            # would be false there, so fall back to the direct textual prompt.
+            if scene_graph is None:
+                raise ValueError("scene_graph is required for visual_textual mode")
+            user = _directify(
+                USER_SUPPLEMENTARY_VISUAL_TEXTUAL.format(
+                    scene_graph=scene_graph, question=question
+                )
+            )
+            return SYSTEM_SUPPLEMENTARY_VISUAL_TEXTUAL, user
+        if profile == "gom_v3_concise":
+            return SYSTEM_GOM_V3, USER_GOM_V3.format(question=question)
+        if profile == "gom_v3b_concise":
+            return SYSTEM_GOM_V3B, USER_GOM_V2.format(question=question)
+        return SYSTEM_GOM_V2, USER_GOM_V2.format(question=question)
 
     if mode == "visual_textual":
         if scene_graph is None:

@@ -21,6 +21,8 @@ def test_animal_relation_question_is_controlled_and_targeted():
 def test_visual_plural_aliases_are_canonical():
     assert canonical_object_label("people") == "person"
     assert canonical_object_label("monitors") == "tv"
+    assert canonical_object_label("shelves") == "shelf"
+    assert canonical_object_label("knives") == "knife"
     intent = parse_question_intent("How many people are in the bus?")
     assert "person" in intent.anchor_terms
     assert "bus" in intent.anchor_terms
@@ -41,11 +43,46 @@ def test_relation_matching_uses_phrase_boundaries():
 
 def test_non_object_question_words_do_not_become_detector_queries():
     assert parse_question_intent("Where is he looking?").detector_queries == ("person",)
-    assert parse_question_intent("Is this a creamy soup?").detector_queries == ("soup",)
-    assert parse_question_intent("Is this rice noodle soup?").detector_queries == ("soup",)
+    # Open-vocabulary queries keep modifier+head phrases but never the bare
+    # modifier: "creamy soup" is a usable OWLv2 query, "creamy" is not.
+    creamy = parse_question_intent("Is this a creamy soup?").detector_queries
+    assert "soup" in creamy and "creamy soup" in creamy and "creamy" not in creamy
     assert "between" not in parse_question_intent(
         "Why is there a gap between the roof and wall?"
     ).detector_queries
+    for word in ("photo", "side", "kind", "looking", "left", "right"):
+        assert word not in parse_question_intent(
+            "On which side of the photo is the left kind of thing looking?"
+        ).detector_queries
+
+
+def test_open_vocabulary_objects_become_detector_queries():
+    """The closed ontology never knew these; without them the queried object is
+    simply never detected and Algorithm 3 marks unrelated things instead."""
+    assert "cheeseburger" in parse_question_intent(
+        "Is the man eating a cheeseburger?"
+    ).detector_queries
+    assert "vans" in parse_question_intent(
+        "Do you see vans to the left of the bus on the left?"
+    ).detector_queries
+    assert "towel" in parse_question_intent(
+        "Is the towel to the left or to the right of the cabinet?"
+    ).detector_queries
+    teddy = parse_question_intent(
+        "Is the teddy bear to the left of the cheeseburger sitting in a toy car?"
+    ).detector_queries
+    assert "teddy bear" in teddy and "toy car" in teddy
+    assert len(teddy) < 30
+
+
+def test_category_words_are_not_detector_queries():
+    """OWLv2 labels a mark with the query string, so querying 'animal' produced
+    marks reading 'animal_1' instead of 'cow_1'. Members are queried instead."""
+    queries = parse_question_intent(
+        "What kind of animal is to the left of the zebra?"
+    ).detector_queries
+    assert "animal" not in queries
+    assert "cow" in queries and "zebra" in queries
 
 
 def test_person_pronoun_is_a_relation_source():

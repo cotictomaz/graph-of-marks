@@ -69,6 +69,14 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated extra conditions beyond paper_spec (supported: text_graph).",
     )
     parser.add_argument(
+        "--conditions",
+        default="",
+        help=(
+            "Comma-separated subset of paper_spec conditions to run "
+            "(default: all). paper_spec.yaml itself is never modified."
+        ),
+    )
+    parser.add_argument(
         "--artifact-granularity", choices=("image", "question"), default="image"
     )
     parser.add_argument(
@@ -298,7 +306,14 @@ def main() -> int:
             template_rows = template_rows[: args.limit]
         preprocessing = args.data_root / "artifacts" / dataset / "preprocessing"
         extra = [v.strip() for v in args.extra_conditions.split(",") if v.strip()]
-        all_conditions = list(spec["conditions"].items()) + [
+        spec_conditions = list(spec["conditions"].items())
+        if args.conditions:
+            requested = [v.strip() for v in args.conditions.split(",") if v.strip()]
+            unknown = sorted(set(requested) - set(spec["conditions"]))
+            if unknown:
+                raise SystemExit(f"Unknown conditions {unknown}; paper_spec has {sorted(spec['conditions'])}")
+            spec_conditions = [(name, spec["conditions"][name]) for name in requested]
+        all_conditions = spec_conditions + [
             (name, {"render_variant": None}) for name in extra
         ]
         for condition, condition_spec in all_conditions:

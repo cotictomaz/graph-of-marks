@@ -21,17 +21,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_question_type():
+def load_question_intent_module():
     # Load the file directly: importing the gom package pulls in torch.
     path = ROOT / "src" / "gom" / "question_intent.py"
     spec = importlib.util.spec_from_file_location("_gom_question_intent", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # dataclasses resolve types via sys.modules
     spec.loader.exec_module(module)
-    return module._question_type
+    return module
 
 
-question_type = _load_question_type()
+question_type = load_question_intent_module()._question_type
 
 COLOR_WORDS = frozenset(
     """
@@ -80,6 +80,29 @@ def appearance_reason(question: str, answers) -> str | None:
         return "color_word_in_answers"
     if _SUBJECTIVE_RE.search(q):
         return "subjective"
+    return None
+
+
+# Curation (eval-set definition) adds one reason on top of the score-time
+# appearance filter: questions whose referent is unresolvable from the image
+# alone ("What is the small item of furniture called?").
+_AMBIGUOUS_REFERENT_RE = re.compile(
+    r"\b(?:what|which)\b.{0,40}\b(?:item|object|thing)s?\b|\bcalled\b"
+)
+# text-reading asks appearance_reason's _TEXT_IN_IMAGE_RE misses
+_TEXT_IN_IMAGE_EXTRA_RE = re.compile(r"\b(sponsor|logo|sign say|advertis)")
+
+
+def curation_reason(question: str, answers) -> str | None:
+    """Why this question should be excluded from the curated eval set, or None."""
+    reason = appearance_reason(question, answers)
+    if reason is not None:
+        return reason
+    q = question.lower()
+    if _AMBIGUOUS_REFERENT_RE.search(q):
+        return "ambiguous_referent"
+    if _TEXT_IN_IMAGE_EXTRA_RE.search(q):
+        return "text_in_image"
     return None
 
 

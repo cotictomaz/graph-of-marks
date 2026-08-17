@@ -264,3 +264,97 @@ normalization. Single runs, different bare prompt.
 | GoM numeric IDs + relation labels | 51.04 |
 
 These do not reproduce the published improvement and must not be merged with the runs above.
+
+## gom_v2 run (`data_v5`, 2026-08-16) — defect-free pipeline, curated eval, still no across-model VQA gain
+
+The user-directed overhaul after the FLIP_EXAMPLES_PAPER_GOM audit. Every defect that audit
+surfaced was fixed and visually verified on a 49-image control set before launch (see
+CLAUDE.md "gom_v2" note): `gom_v2` render profile (outline, targeted open-vocab detection,
+caps 15/4, cross-class suppression, stuff-mask filter with the `_N`-suffix bug fixed,
+Algorithm 3 zero-match top-6 fallback, 1 relation/head, arrows below labels, active
+label-collision avoidance), `gom_v2_concise` prompt (marks explained, demoted to hints,
+ID/relation-word/color answers banned, direct answers), curated one-question-per-image eval
+(`curate_eval.py`, locks in `manifests/*_curated_v1.txt`: 996/988/991 rows — appearance,
+subjective, ambiguous-referent, text-reading questions removed; spatial/relational preferred),
+conditions raw + the four `gom_*` only, `seed0/temp0.2/top_p0.9`.
+
+Renders: mean 3.9 marks/image (max 7), max 5 arrows — versus 20–35 marks in the paper-faithful
+runs. LlamaV plan-mode cured (4–6 per 1000, was 370–540). ID-leak answers on `gom_text_labeled`:
+Gemma 0, Qwen 83/2975, LlamaV 79/2975 (concentrated on "who …?" questions; numeric conditions
+immune). Report: `data_v5/table2_report.gom_v2_concise.{json,md}`.
+
+Δ = best gom condition − raw, lenient metric (`gqa_hit` with ≤6-token guard /
+`vqa_soft_acc_phrase`); strict in parentheses:
+
+| model | GQA | VQAv1 | VQAv2 | RefCOCOg (best gom, strict) |
+|---|---:|---:|---:|---:|
+| gemma3_4b | **+1.81** (−0.70) | −2.38 (−2.40) | −0.42 (−0.73) | 51.00 (text) |
+| qwen25_vl_7b | −6.43 (−6.22) | −6.72 (−6.88) | −6.66 (−7.17) | 35.04 (numeric+labels) |
+| llamav_o1_11b | −3.41 (−6.02) | −6.27 (−8.70) | −7.79 (−10.70) | 28.05 (numeric) |
+
+Break/rescue balance (best condition): Gemma GQA is the only cell where marks net-help
+(109 rescues vs 91 breaks); Qwen stays at 3–11× more breaks than rescues. Of the 12 original
+flip cases (11 kept after curation), 6–8/11 now answer correctly on the marked image.
+
+**Verdict.** With clutter, label placement, mask fill, prompting, scoring normalization and
+question quality all fixed — and verified fixed by direct visual inspection — marks still cost
+Qwen ~6.5 and LlamaV ~3–8 points, and leave Gemma at parity. The paper's across-model VQA
+gains do not appear under any configuration found in three independent searches (data_v3
+§Best-config, the 230-rule subsample search, and this one). The durable positive results
+remain: marks are indispensable for RefCOCOg grounding, and mark-induced damage is now small
+and characterized (near-miss label leaks like cupcakes→cake, yes→no flips on relational
+questions) rather than catastrophic.
+
+## gom_v3 run (`data_v6`, 2026-08-17) — render defects fixed, VQA verdict unchanged
+
+Follow-up to the user's visual audit of the gom_v2 flip gallery, which found five defect
+classes still present (`FLIP_AUDIT_GOM_V2.md` classifies all 20 cases). Fixes, all verified
+before the run by a 93-row stress-audit set stratified over the failure modes
+(`make_audit_set.py`, `check_render_quality.py`, `check_leakage.py`):
+
+1. **Open-vocabulary detector queries** (`question_intent.py`): the closed `_VISUAL_OBJECTS`
+   gate meant "van", "cheeseburger", "towel", "skier", "guitar" were never queried. Now any
+   content noun plus modifier+head phrases ("teddy bear", "coffee table") reach OWLv2, and bare
+   category words are *removed* (querying "animal" produced marks labelled `animal_1`).
+   Effect: 228 distinct open-vocabulary classes vs 16, marks only 3.40 → 3.57 per image.
+2. **Deterministic label placement** (`visualizer.py`, `deterministic_label_placement`): arrows
+   are predicted before labels are placed; a shared registry enforces a hard zero-overlap
+   constraint over object labels, relation labels and arrows; ranked candidates + spiral
+   fallback; every post-hoc mover is bypassed (they were re-introducing overlaps).
+   **Result: `label_overlap_count == 0` on all 3,975 images x 6 variants**, recorded per render.
+3. **Part-of-object fragment dedup** (mask containment ≥ 0.70, not box containment): removes the
+   elephant-leg class of duplicate mark; distinct instances keep disjoint masks and survive.
+4. **Prompt v3** — presence assertion plus few-shot exemplars naming the forbidden tokens.
+
+**The prompt was a regression, and the experiment says so.** Running the same gom_v3 renders
+under both prompts isolates it (lenient Δ = best gom − raw):
+
+| configuration | gemma GQA | gemma V1 | gemma V2 | qwen GQA | qwen V1 | qwen V2 | llamav GQA | llamav V1 | llamav V2 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| v2 renders + v2 prompt (`data_v5`) | **+1.81** | −2.38 | −0.42 | −6.43 | −6.72 | −6.66 | −3.41 | −6.27 | −7.79 |
+| v3 renders + v3 prompt (`data_v6`) | −1.10 | −2.35 | −2.73 | −6.63 | −7.28 | −7.05 | −11.04 | −8.34 | −10.37 |
+| v3 renders + v2 prompt (`data_v6`) | 0.00 | **−1.60** | −1.31 | −6.93 | −7.86 | −8.08 | −4.62 | −6.78 | −8.46 |
+
+Prompt v3 costs LlamaV 6.4 points on GQA and Gemma 1.1: naming a banned token in a prohibition
+("never person_1", "never above or below") *raises* its probability — Gemma's bare-relation-word
+answers went 1 → 31 and LlamaV's plan-mode returned (0 → 9-14). A positive-only rewrite
+(`gom_v3b_concise`) did not beat `gom_v2_concise` on the audit set either. **Use
+`gom_v2_concise`.** The v3 profiles stay in the code with this measurement recorded.
+
+**The render fixes are neutral on VQA and slightly positive on grounding.** Comparing the two
+`v2 prompt` rows: VQA moves within ±1.8 in both directions; RefCOCOg improves for every model
+(51.00 → 51.84 gemma, 35.04 → 35.15 qwen, 28.05 → 28.67 llamav). Clean renders did not convert
+into VQA gains.
+
+**Residual, measured, not hidden:** text-tag ID leakage on "who" questions is a model behaviour
+no prompt tested removes (full run: 87-90 leaks per condition for Qwen, 152-172 for LlamaV on
+text conditions; **4-5 and 18-19 on numeric conditions**). Open-vocabulary labels make it worse
+precisely because `boy_1`/`girl_1` *are* the answer. All four gom conditions are evaluated, so
+the tables show it.
+
+**Verdict after three overhauls.** With clutter, occlusion, mask fill, label overlap, detection
+coverage, fragment marks, prompting, scoring normalisation and question quality all fixed and
+each fix verified by an automated gate rather than by eyeballing: Gemma-3-4B reaches VQA parity
+(+1.8 to −1.6), Qwen2.5-VL-7B stays at −6 to −8, LlamaV-o1-11B at −3.4 to −8.5, and marks remain
+indispensable for RefCOCOg grounding (0 → 28-52). The paper's across-model VQA gains do not
+reproduce under any configuration found in four independent searches.

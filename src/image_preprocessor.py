@@ -33,7 +33,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "quality_vqa", "paper_legacy", "paper_aaai26",
             "paper_aaai26_outline", "paper_aaai26_lowfill",
             "paper_aaai26_outline_clean", "paper_aaai26_outline_thin",
-            "paper_aaai26_declutter",
+            "paper_aaai26_declutter", "gom_v2", "gom_v3",
         ],
         default="quality_vqa",
         help="Quality-first defaults or historical paper rendering/filtering",
@@ -69,7 +69,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--grounding_dino_text_threshold", type=float, default=0.25)
 
     # Relations
-    p.add_argument("--max_relations_per_object", type=int, default=3)
+    # default None: an explicit value must not silently clobber the profile's
+    # (this happened to paper_aaai26_declutter's 1-per-head, overridden back to 3)
+    p.add_argument("--max_relations_per_object", type=int, default=None)
     p.add_argument("--min_relations_per_object", type=int, default=None)
     p.add_argument(
         "--relation_selection_policy",
@@ -306,7 +308,8 @@ def _build_config(args: argparse.Namespace) -> PreprocessorConfig:
     cfg.grounding_dino_text_threshold = float(args.grounding_dino_text_threshold)
 
     # Relations
-    cfg.max_relations_per_object = int(args.max_relations_per_object)
+    if args.max_relations_per_object is not None:
+        cfg.max_relations_per_object = int(args.max_relations_per_object)
     if args.min_relations_per_object is not None:
         cfg.min_relations_per_object = int(args.min_relations_per_object)
     if args.relation_selection_policy is not None:

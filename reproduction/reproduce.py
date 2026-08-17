@@ -157,6 +157,20 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Forward extra inference conditions (e.g. text_graph).",
     )
+    parser.add_argument(
+        "--conditions",
+        default="",
+        help="Forward a subset of paper_spec conditions to inference (default: all).",
+    )
+    parser.add_argument(
+        "--skip-prepare",
+        action="store_true",
+        help=(
+            "Do not regenerate prepared/ inputs during preprocess. Required on "
+            "curated data roots, where prepare would overwrite the curated "
+            "eval.jsonl and preproc_input.json."
+        ),
+    )
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -452,7 +466,8 @@ def build_images(
 
 def preprocess(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
     preflight(args, datasets, require_images=True, require_fasttext=True)
-    prepare(args, datasets)
+    if not args.skip_prepare:
+        prepare(args, datasets)
     fasttext = absolute_without_resolving(args.fasttext)
     fasttext_vectors = Path(str(fasttext) + ".vectors.npy")
     fasttext_provenance = {
@@ -620,6 +635,8 @@ def inference(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
             command.extend(["--limit", str(args.limit)])
         if args.extra_conditions:
             command.extend(["--extra-conditions", args.extra_conditions])
+        if args.conditions:
+            command.extend(["--conditions", args.conditions])
         if args.resume:
             command.append("--resume")
         run(command, dry_run=args.dry_run)

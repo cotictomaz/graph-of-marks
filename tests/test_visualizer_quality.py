@@ -149,3 +149,77 @@ def test_overlap_fallback_separates_relation_and_object_labels(monkeypatch):
         fixed.get_window_extent(renderer)
     )
     plt.close(fig)
+
+
+def _dense_scene():
+    """A deliberately hostile scene: adjacent small boxes in a tight grid."""
+    boxes, labels, rels = [], [], []
+    for row in range(3):
+        for col in range(4):
+            x, y = 20 + col * 70, 20 + row * 60
+            boxes.append([x, y, x + 46, y + 38])
+            labels.append(f"object_{row * 4 + col + 1}")
+    for i in range(8):
+        rels.append({"src_idx": i, "tgt_idx": i + 1, "relation": "left_of"})
+    return boxes, labels, rels
+
+
+def test_deterministic_placement_never_overlaps_labels():
+    boxes, labels, rels = _dense_scene()
+    image = Image.new("RGB", (340, 230), (128, 128, 128))
+    cfg = VisualizerConfig(
+        display_labels=True,
+        display_relationships=True,
+        display_relation_labels=True,
+        deterministic_label_placement=True,
+        show_segmentation=False,
+        show_bboxes=True,
+        fill_segmentation=False,
+    )
+
+    fig, _ = Visualizer(cfg).draw(
+        image,
+        boxes=boxes,
+        labels=labels,
+        scores=[0.9] * len(boxes),
+        relationships=rels,
+        masks=None,
+    )
+    try:
+        assert fig._gom_label_overlap_count == 0, (
+            f"{fig._gom_label_overlap_count} overlapping label pairs on a dense scene"
+        )
+        # Placement must actually have happened, not been skipped.
+        assert len(fig._gom_label_boxes) >= len(boxes)
+    finally:
+        plt.close(fig)
+
+
+def test_deterministic_placement_keeps_label_bound_to_its_own_object():
+    """Guards the label<->object binding: each label must sit nearest its own box."""
+    image = Image.new("RGB", (400, 200), (90, 90, 90))
+    boxes = [[10, 60, 90, 140], [150, 60, 230, 140], [300, 60, 380, 140]]
+    labels = ["left_1", "middle_1", "right_1"]
+    cfg = VisualizerConfig(
+        display_labels=True,
+        display_relationships=False,
+        deterministic_label_placement=True,
+        show_segmentation=False,
+        show_bboxes=True,
+    )
+    fig, ax = Visualizer(cfg).draw(
+        image,
+        boxes=boxes,
+        labels=labels,
+        scores=[0.9] * 3,
+        relationships=[],
+        masks=None,
+    )
+    try:
+        by_text = {t.get_text(): t.get_position()[0] for t in ax.texts}
+        assert by_text["left_1"] < by_text["middle_1"] < by_text["right_1"]
+        for label, box in zip(labels, boxes):
+            centre_x = (box[0] + box[2]) / 2
+            assert abs(by_text[label] - centre_x) < 120, f"{label} drifted off its object"
+    finally:
+        plt.close(fig)

@@ -58,10 +58,22 @@ def is_wrong(pred, row, ds):
 
 
 def main() -> int:
+    global CONDS
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", type=Path, default=Path("reproduction/data_v2"))
     ap.add_argument("--prompt-profile", default="supplementary_concise")
+    ap.add_argument(
+        "--conditions",
+        default=",".join(CONDS),
+        help="Comma-separated conditions present in this data root.",
+    )
+    ap.add_argument(
+        "--flip-condition",
+        default="segmented",
+        help="Marked condition for the flip taxonomy (must be in --conditions).",
+    )
     args = ap.parse_args()
+    CONDS = tuple(v.strip() for v in args.conditions.split(",") if v.strip())
     root = args.data_root
 
     rows_by = {}
@@ -103,7 +115,8 @@ def main() -> int:
                 lenient = 100 * sum(vqa_soft_acc_phrase(v, rows[q]["answers"]) for q, v in p.items()) / len(p)
             print(f"| {ds} | {c} | {strict:.2f} | {lenient:.2f} | {lenient - strict:+.2f} |")
 
-    print("\n## 3. Flip taxonomy: raw-right -> segmented-wrong (kept = survives appearance filter)\n")
+    flip_cond = args.flip_condition
+    print(f"\n## 3. Flip taxonomy: raw-right -> {flip_cond}-wrong (kept = survives appearance filter)\n")
     print("| model | dataset | flips | kept-flips | color_shift | label_leak | count=marks | yes->no | other |")
     print("|---|---|---:|---:|---:|---:|---:|---:|---:|")
     examples = {}
@@ -111,7 +124,7 @@ def main() -> int:
         for ds in DATASETS:
             rows = rows_by[ds]
             raw = preds(root, args.prompt_profile, m, ds, "raw")
-            seg = preds(root, args.prompt_profile, m, ds, "segmented")
+            seg = preds(root, args.prompt_profile, m, ds, flip_cond)
             cats = {"color_shift": 0, "label_leak": 0, "count=marks": 0, "yes->no": 0, "other": 0}
             flips = kept_flips = 0
             for q, row in rows.items():
@@ -158,7 +171,7 @@ def main() -> int:
                 fn += 1
         print(f"| {ds} | {kept} | {fn} |")
 
-    print("\n## Examples per category (question | gold | raw | segmented | stem)\n")
+    print(f"\n## Examples per category (question | gold | raw | {flip_cond} | stem)\n")
     for (m, ds, cat), ex in sorted(examples.items()):
         if m != "qwen25_vl_7b" or cat == "other":
             continue

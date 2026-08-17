@@ -457,6 +457,37 @@ _PAPER_AAAI26_DECLUTTER_PROFILE = {
     "filter_redundant_relations": True,
 }
 
+# gom_v2: the post-audit best-effort profile. Outline renders plus everything the
+# flip-case audit showed the paper profile was missing: question-derived open-vocab
+# detection, detection caps, cross-class dedup, stuff-mask filtering, and a bounded
+# fallback when Algorithm 3 matches nothing (instead of marking every detection).
+_GOM_V2_PROFILE = {
+    **_PAPER_AAAI26_OUTLINE_PROFILE,
+    "profile": "gom_v2",
+    "targeted_open_vocabulary": True,
+    "max_detections_total": 15,
+    "max_detections_per_label": 4,
+    "cross_class_suppression": True,
+    "enable_mask_quality_filter": True,
+    "max_relations_per_object": 1,
+    "filter_redundant_relations": True,
+    "max_picture_area_ratio": 0.95,
+    "paper_zero_match_top_k": 6,
+}
+
+# gom_v3: gom_v2 plus the fixes from the 20-case flip audit
+# (reproduction/FLIP_AUDIT_GOM_V2.md) - deterministic zero-overlap label
+# placement, part-of-object fragment dedup, and open-vocabulary detector queries
+# (the query change lives in question_intent.py and applies wherever targeted
+# open-vocabulary detection is enabled).
+_GOM_V3_PROFILE = {
+    **_GOM_V2_PROFILE,
+    "profile": "gom_v3",
+    "deterministic_label_placement": True,
+    "measure_text_with_renderer": True,
+    "same_class_fragment_containment": 0.70,
+}
+
 _PROFILE_TABLES = {
     "paper_legacy": _LEGACY_PROFILE,
     "paper_aaai26": _PAPER_AAAI26_PROFILE,
@@ -465,6 +496,8 @@ _PROFILE_TABLES = {
     "paper_aaai26_outline_clean": _PAPER_AAAI26_OUTLINE_CLEAN_PROFILE,
     "paper_aaai26_outline_thin": _PAPER_AAAI26_OUTLINE_THIN_PROFILE,
     "paper_aaai26_declutter": _PAPER_AAAI26_DECLUTTER_PROFILE,
+    "gom_v2": _GOM_V2_PROFILE,
+    "gom_v3": _GOM_V3_PROFILE,
 }
 
 

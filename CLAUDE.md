@@ -229,6 +229,39 @@ GQA+VQAv2) produced zero candidates even on train; final config pilots
 outcome-selected subsample "wins" are in `data_v3/showcase_rescues.*.json` and are
 diagnostic only.
 
+**gom_v3 run (`data_v6`, 2026-08-17, RESULTS.md §gom_v3) — the render defects are fixed and
+the VQA verdict still holds.** Driven by a visual audit of all 20 gom_v2 flip cases
+(`reproduction/FLIP_AUDIT_GOM_V2.md`). Three pipeline fixes: open-vocabulary detector queries
+(`question_intent.py` — the closed `_VISUAL_OBJECTS` gate is dropped for queries, bare category
+words removed since OWLv2 labels a mark with the query string), **deterministic label placement**
+(`visualizer.py`, `deterministic_label_placement`; predicted arrow paths + shared registry +
+hard zero-overlap constraint + spiral fallback, all post-hoc movers bypassed →
+`label_overlap_count == 0` on 3,975 images × 6 variants, recorded per render in
+`*_render_variants.json` and checkable via `check_render_quality.py`), and mask-containment
+fragment dedup (`same_class_fragment_containment`). Gate tooling: `make_audit_set.py` (93 rows
+stratified over who/existence/left-right/open-vocab/dense/small), `check_render_quality.py`,
+`check_leakage.py`. **Use profile `gom_v3` with prompt `gom_v2_concise`** — prompt v3's explicit
+bans backfired by negation priming (LlamaV −6.4 GQA, Gemma's relation-word answers 1→31,
+plan-mode 0→9-14); the isolation experiment (same renders, two prompts) is in RESULTS.md.
+Render fixes are neutral on VQA (±1.8) and slightly positive on RefCOCOg. Residual: text-tag ID
+leakage on "who" questions (Qwen 87-90/condition, LlamaV 152-172) vs 4-5/18-19 on numeric
+conditions — not promptable away, both conditions evaluated.
+
+**gom_v2 run (`data_v5`, 2026-08-16, RESULTS.md §gom_v2) — the search was reopened once
+more with every FLIP_EXAMPLES_PAPER_GOM defect fixed, and the verdict held.** New `gom_v2`
+profile (outline + targeted open-vocab + caps 15/4 + cross-class suppression + stuff filter
+with the `_N`-suffix bug fixed + Alg-3 zero-match top-6 + 1 rel/head; renders: mean 3.9
+marks, max 5 arrows), `gom_v2_concise` prompt (marks explained/demoted/banned as answers;
+LlamaV plan-mode cured to 4–6/1000), curated eval locked in
+`reproduction/manifests/*_curated_v1.txt` (996/988/991 one-per-image rows via
+`curate_eval.py`; `reproduce.py preprocess --skip-prepare` required on curated roots),
+conditions raw+4 gom_* via the new `--conditions` flag, lenient headline metric. Result:
+Gemma GQA +1.81 lenient (only net-positive cell, 109 rescues vs 91 breaks); everything else
+negative (Qwen ~−6.5 everywhere, LlamaV −3.4..−7.8 lenient); RefCOCOg 28–51 vs 0 raw.
+Beware: `image_preprocessor.py` CLI defaults silently clobber profile fields —
+`max_relations_per_object` was the live case (data_v4 declutter actually ran 3/head); use
+the `default=None` + conditional-assign pattern for any profile field with a CLI flag.
+
 ## Known confounds in the Table 2 negative result
 
 Established 2026-08-11 from the existing artifacts; **the appearance-filtered re-score was

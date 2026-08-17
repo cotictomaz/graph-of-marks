@@ -183,6 +183,18 @@ def label_aliases(label: str) -> Set[str]:
                     aliases.add(_normalize(lemma.replace("_", " ")))
     except Exception:
         pass
+    # Plural forms so a question's "shelves"/"benches" lexically matches shelf_N.
+    for alias in list(aliases):
+        if not alias or alias.endswith("s"):
+            continue
+        aliases.add(f"{alias}s")
+        aliases.add(f"{alias}es")
+        if alias.endswith("f"):
+            aliases.add(f"{alias[:-1]}ves")
+        elif alias.endswith("fe"):
+            aliases.add(f"{alias[:-2]}ves")
+        elif alias.endswith("y") and len(alias) > 2 and alias[-2] not in "aeiou":
+            aliases.add(f"{alias[:-1]}ies")
     return {alias for alias in aliases if alias}
 
 
@@ -316,8 +328,17 @@ def filter_paper_graph(
     question: str,
     config: PaperRelationConfig = PaperRelationConfig(),
     semantic_similarity: Optional[Callable[[str, str], float]] = None,
+    boxes: Optional[Sequence[Sequence[float]]] = None,
+    scores: Optional[Sequence[float]] = None,
+    zero_match_top_k: int = 0,
 ) -> Tuple[List[int], List[Dict[str, Any]]]:
-    """Implement Algorithm 3 and remap relation endpoints to kept-object indices."""
+    """Implement Algorithm 3 and remap relation endpoints to kept-object indices.
+
+    When the question matches no detected object the published algorithm keeps
+    every object.  With ``zero_match_top_k > 0`` (and ``boxes``/``scores``
+    given) that branch instead keeps the top-K objects by ``score * sqrt(area)``
+    so an unmatchable query degrades to a few salient marks, not a mark-storm.
+    """
     matched: List[int] = []
     for index, label in enumerate(labels):
         aliases = label_aliases(label)
@@ -332,8 +353,24 @@ def filter_paper_graph(
             matched.append(index)
 
     if not matched:
-        kept = list(range(len(labels)))
-        candidate_edges = [dict(edge) for edge in relationships]
+        if zero_match_top_k > 0 and boxes is not None and len(boxes) == len(labels):
+            saliency = []
+            for index in range(len(labels)):
+                box = boxes[index]
+                area = max(0.0, float(box[2]) - float(box[0])) * max(
+                    0.0, float(box[3]) - float(box[1])
+                )
+                score = float(scores[index]) if scores is not None else 1.0
+                saliency.append((-score * math.sqrt(area), index))
+            kept = sorted(index for _, index in sorted(saliency)[:zero_match_top_k])
+        else:
+            kept = list(range(len(labels)))
+        kept_set = set(kept)
+        candidate_edges = [
+            dict(edge)
+            for edge in relationships
+            if int(edge["src_idx"]) in kept_set and int(edge["tgt_idx"]) in kept_set
+        ]
     elif len(matched) == 1:
         head = matched[0]
         candidate_edges = [
