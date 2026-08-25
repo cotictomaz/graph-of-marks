@@ -88,7 +88,7 @@ class VisualizerConfig:
             display_labels: Show object labels (default: True)
             display_relationships: Show relationship arrows between objects (default: True)
             display_relation_labels: Show text labels on relationship arrows (default: True)
-            display_legend: Show color legend (default: True)
+            display_legend: Show color legend (default: False)
             show_segmentation: Show segmentation masks (default: True)
             fill_segmentation: Fill masks vs outline only (default: True)
             show_bboxes: Show bounding boxes (default: True)
@@ -98,13 +98,13 @@ class VisualizerConfig:
             use_batch_text_renderer: Batch text rendering, 20-30% speedup (default: True)
             
         Typography and Styling:
-            obj_fontsize_inside: Font size for labels inside boxes (default: 12)
-            obj_fontsize_outside: Font size for labels outside boxes (default: 12)
-            rel_fontsize: Font size for relationship labels (default: 10)
+            obj_fontsize_inside: Font size for labels inside boxes (default: 9)
+            obj_fontsize_outside: Font size for labels outside boxes (default: 10)
+            rel_fontsize: Font size for relationship labels (default: 8)
             legend_fontsize: Font size for legend text (default: 8)
-            seg_fill_alpha: Transparency of segmentation fills 0.0-1.0 (default: 0.75)
+            seg_fill_alpha: Transparency of segmentation fills 0.0-1.0 (default: 0.25)
             bbox_linewidth: Line width for bounding boxes in points (default: 2.0)
-            rel_arrow_linewidth: Line width for relationship arrows (default: 2.5)
+            rel_arrow_linewidth: Line width for relationship arrows (default: 2.0)
             rel_arrow_mutation_scale: Arrow head size scaling factor (default: 26.0)
             label_bbox_linewidth: Line width for object label borders (default: 3.0)
             relation_label_bbox_linewidth: Line width for relation label borders (default: 3.0)
@@ -138,11 +138,11 @@ class VisualizerConfig:
         Relation Label Positioning:
             relation_label_placement: Label position on arrow - "midpoint" (default: "midpoint")
             relation_label_offset_px: Pixel offset from arrow path (default: 10.0)
-            relation_label_max_dist_px: Maximum label movement from arrow (default: 50.0)
+            relation_label_max_dist_px: Maximum label movement from arrow (default: 20.0)
             
         Color Enhancement:
-            color_sat_boost: Saturation boost multiplier for colors (default: 1.30)
-            color_val_boost: Value/brightness boost multiplier (default: 1.15)
+            color_sat_boost: Saturation boost multiplier for colors (default: 1.1)
+            color_val_boost: Value/brightness boost multiplier (default: 1.1)
             
         Spatial Relationship Rendering:
             on_top_gap_px: Vertical gap for "on_top_of" relationships (default: 8)

@@ -133,8 +133,11 @@ result = pipeline.process("scene.jpg", config=config, save=False)
 ### Command-Line Interface
 
 ```bash
-# Image preprocessing
-gom-preprocess --input_file data.json --image_dir images/ --output_folder output/
+# Image preprocessing — a JSON list of {"image_path", "question"?} pairs
+gom-preprocess --json_file data.json --output_folder output/
+
+# ...or a single image
+gom-preprocess --input_path scene.jpg --output_folder output/
 
 # Visual Question Answering
 gom-vqa --input_file vqa_data.json --model_name llava-hf/llava-1.5-7b-hf
@@ -154,11 +157,11 @@ The GoM pipeline processes images through the following stages:
 
 | Stage | Description | Models |
 |-------|-------------|--------|
-| Detection | Object localization | YOLOv8, OWL-ViT, GroundingDINO, Detectron2 |
+| Detection | Object localization | OWL-ViT + YOLOv8 + Detectron2 by default; GroundingDINO opt-in via `--detectors` |
 | Fusion | Prediction aggregation | Weighted Box Fusion (WBF), NMS |
-| Segmentation | Instance mask generation | SAM, SAM2, SAM-HQ, FastSAM |
-| Depth Estimation | 3D scene understanding | Depth Anything V2 |
-| Relationship Extraction | Spatial/semantic relations | CLIP-based, physics-based |
+| Segmentation | Instance mask generation | SAM, SAM2, SAM-HQ (default), FastSAM |
+| Depth Estimation | 3D scene understanding | Depth Anything V2 (default); MiDaS DPT (fallback / paper profile) |
+| Relationship Extraction | Spatial/semantic relations | Geometric + depth (default); CLIP/physics opt-in |
 | Graph Construction | Scene graph generation | NetworkX |
 
 <p align="center">
@@ -206,21 +209,91 @@ result = {
 | `gom_text_labeled` | Textual | Yes | Yes | VQA tasks |
 | `gom_numeric_labeled` | Numeric | Yes | Yes | RefCOCO tasks |
 
+Alphabetic variants (`som_alphabetic`, `gom_alphabetic`, `gom_alphabetic_labeled`)
+exist too. Style presets are selected through the Python API only —
+`ProcessingConfig(style="gom_text_labeled")`, keys in `GOM_STYLE_PRESETS`. The
+CLI has no `--style` flag; reproduce a style there with `--label_mode` +
+`--display_relationships` / `--display_relation_labels`, or select a `--profile`.
+
 ### Pipeline Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `detectors_to_use` | Detection models to employ | `("yolov8",)` |
+| `detectors_to_use` | Detection models to employ | `("owlvit", "yolov8", "detectron2")` |
 | `sam_version` | Segmentation model version | `"hq"` |
-| `wbf_iou_threshold` | IoU threshold for WBF fusion | `0.55` |
-| `label_mode` | Label format (`"original"` or `"numeric"`) | `"original"` |
+| `wbf_iou_threshold` | IoU threshold for WBF fusion | `0.90` |
+| `label_mode` | Label format (`"original"`, `"numeric"`, or `"alphabetic"`) | `"original"` |
 | `display_labels` | Render object labels | `True` |
 | `display_relationships` | Render relationship arrows | `True` |
 | `display_relation_labels` | Render labels on arrows | `True` |
 | `show_segmentation` | Render segmentation masks | `True` |
-| `output_format` | Output image format | `"png"` |
+| `output_format` | Output image format (`"jpg"`, `"png"`, `"svg"`) | `"jpg"` |
 
-Complete configuration options are documented in [`src/gom/config.py`](src/gom/config.py).
+The `GoM` API applies these defaults through its `quality_vqa` profile, which
+overrides a few of them (e.g. `detectors_to_use=("owlvit", "yolov8")`,
+`wbf_iou_threshold=0.55`). The full field set with per-field comments lives on
+`PreprocessorConfig` in [`src/gom/pipeline/preprocessor.py`](src/gom/pipeline/preprocessor.py).
+
+### Appearance of the annotated image
+
+The look of the rendered marks — arrow thickness, mask fill and colour, outline
+width, fonts, and label style — is controlled by the fields below. They are
+settable both as `ProcessingConfig` fields (Python API) and as CLI flags on
+`gom-preprocess` (same names, prefixed with `--`).
+
+| What it controls | Field / CLI flag | Default | Notes |
+|------------------|------------------|---------|-------|
+| Relation-arrow line thickness | `rel_arrow_linewidth` | `2.0` | |
+| Relation-arrow head size | `rel_arrow_mutation_scale` | `26.0` | |
+| Fill masks vs. outline-only | `fill_segmentation` | `False` | outline-only keeps image evidence for VQA |
+| Mask fill opacity | `seg_fill_alpha` | `0.0` | `0` = no fill; `~0.25`–`0.4` for a visible tint |
+| Mask/label colour saturation | `color_sat_boost` | `1.1` | multiplier on the per-object colour |
+| Mask/label colour brightness | `color_val_boost` | `1.1` | multiplier on the per-object colour |
+| Draw bounding boxes | `show_bboxes` | `False` | contours alone are less visually destructive |
+| Bounding-box outline width | `bbox_linewidth` | `2.0` | |
+| Object-ID font size | `obj_fontsize_inside` / `obj_fontsize_outside` | `14` / `14` | |
+| Relation-label font size | `rel_fontsize` | `12` | |
+| ID-label / relation-label box border | `label_bbox_linewidth` / `relation_label_bbox_linewidth` | `3.0` | **API only — no CLI flag** |
+| Label text style | `label_mode` | `"original"` | `"original"` (`oven_1`), `"numeric"` (`1`), `"alphabetic"` (`A`) |
+| Auto-rescale fonts/arrows by image size | `auto_scale_styles` | `True` | set `False` to use the raw sizes above verbatim |
+
+**CLI** (default `quality_vqa` profile):
+
+```bash
+gom-preprocess --input_path scene.jpg --output_folder out/ \
+  --rel_arrow_linewidth 3.0 --rel_arrow_mutation_scale 30 \
+  --color_sat_boost 1.4 --color_val_boost 1.2 \
+  --fill_segmentation --seg_fill_alpha 0.35 \
+  --show_bboxes --bbox_linewidth 2.5 \
+  --obj_fontsize_inside 16 --obj_fontsize_outside 16 --rel_fontsize 14 \
+  --label_mode numeric --no-auto_scale_styles
+```
+
+**Python API:**
+
+```python
+from gom import GoM, ProcessingConfig
+
+gom = GoM(device="cuda")                       # quality_vqa profile
+config = ProcessingConfig(
+    rel_arrow_linewidth=3.0,                    # arrow thickness
+    rel_arrow_mutation_scale=30.0,             # arrow head size
+    color_sat_boost=1.4, color_val_boost=1.2,  # colour intensity
+    fill_segmentation=True, seg_fill_alpha=0.35,  # mask fill vs outline-only
+    show_bboxes=True, bbox_linewidth=2.5,      # box outline width
+    obj_fontsize_inside=16, obj_fontsize_outside=16, rel_fontsize=14,
+    label_bbox_linewidth=2.0,                  # API only (no CLI flag)
+    label_mode="numeric",
+    auto_scale_styles=False,                   # keep the sizes above verbatim
+)
+result = gom.process("scene.jpg", config=config, save=False)
+```
+
+By default (`quality_vqa`) masks render **outline-only** (`seg_fill_alpha=0.0`)
+with no bounding boxes; set `fill_segmentation=True, seg_fill_alpha≈0.3` for the
+filled look shown above. Under `profile="paper_aaai26"` these appearance fields
+are fixed by the paper spec (`ProcessingConfig` resets them in `__post_init__`),
+so tune appearance under the default `quality_vqa` profile.
 
 ---
 
