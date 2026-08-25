@@ -92,7 +92,7 @@ __all__ = [
     "default_config",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 _LAZY_IMPORTS = {
     # High-level API

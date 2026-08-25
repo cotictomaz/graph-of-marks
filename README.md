@@ -140,6 +140,12 @@ gom-preprocess --input_file data.json --image_dir images/ --output_folder output
 gom-vqa --input_file vqa_data.json --model_name llava-hf/llava-1.5-7b-hf
 ```
 
+> **VQA prompt default.** The default prompt profile is `gom_v2_concise`. It tells
+> the model that the drawn object-ID tags (`person_1`, bare numbers) and relation-arrow
+> words are *location pointers, not answers* — so the VLM never copies a label tag as
+> its reply. Override with `--prompt-profile` (`scripts/run_vqa_inference.py`), e.g.
+> `paper_declared` for verbatim paper reproduction.
+
 ---
 
 ## Pipeline Overview

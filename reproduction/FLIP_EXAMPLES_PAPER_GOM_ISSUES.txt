@@ -1,0 +1,10 @@
+These is the lsit of issues I spot in the 20 errors in reproduction/FLIP_EXAMPLES_PAPER_GOM.md in addition to the ones alreadyy marked in the report.
+
+Note that in general I don't see the arrow's head. they are covered by the end label box. Fix it. It is essential to show the direcectionality of the relationship.
+
+5) this is not just an error in segmentation. We should inform the model that not everything is segmented and useful information can be taken even outsde the gom Marks
+4) in addition to the label leackate, here we did'nt segment the watch. Also, these are not the kind of questions with spatial reasoning I would include in our test set.
+10) the disposition of labels, arrows in general makes very difficult the readility of the graph. The labels left_of that connects socks and ball are too far away from the respective archs. 
+13) here in the prompt we should tell the model to carefully analyze the subject and object of the asked reltionship, net of the marked ones. Also here the arross is not well drawn, it is too small and gets obscured. We need a stronger disposition algorithm
+14) also there the arrows arae not readble. most objects have no arrows visible at all
+18) carefully check the evaluation metric, regularizers, etc. that one should never be deemd incorrect

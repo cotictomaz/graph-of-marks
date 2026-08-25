@@ -15,6 +15,7 @@ PROMPT_PROFILES = (
     "gom_v2_concise",
     "gom_v3_concise",
     "gom_v3b_concise",
+    "gom_v4_concise",
 )
 
 SYSTEM_RAW = "You are a helpful visual assistant."
@@ -139,6 +140,32 @@ SYSTEM_GOM_V3B = (
 )
 
 
+# gom_v4_concise: gom_v2_concise (the measured best) plus two positive-framed
+# sentences for the two mechanisms the gom_v3 flip sweep quantified and no render
+# fix can reach.
+#
+#   1. The mark set is read as an existence oracle, in both directions. On GQA
+#      existence questions the flip rate when the questioned noun IS marked and the
+#      gold is "no" is 34.5% (gemma) / 34.1% (llamav) against 6.0% / 24.2% when it
+#      is not; symmetrically, gold "yes" with the noun UNmarked flips 18.4% (gemma)
+#      / 17.6% (qwen) against 7.6% / 13.5% when marked. Detector confidence does
+#      not separate the false-positive marks from the true ones (0.462 vs 0.474),
+#      so this cannot be fixed by a threshold - only by saying the marks are
+#      partial and fallible.
+#   2. Arrows connect whatever Algorithm 3 selected, which is often not the pair
+#      the question names.
+#
+# Positive framing is not a style choice: v3's explicit bans RAISED the answers
+# they forbade (RESULTS.md gom_v3), so nothing here names a forbidden token.
+SYSTEM_GOM_V4 = SYSTEM_GOM_V2 + (
+    " The outlines cover only part of the scene, and an outline can be wrong: "
+    "decide what is present or absent by looking at the photograph itself. When "
+    "the question names two things, find those two in the photograph and answer "
+    "about them, whichever objects the arrows happen to connect."
+)
+USER_GOM_V4 = USER_GOM_V2
+
+
 def _directify(user: str) -> str:
     for sentence in _CONCISE_INSTRUCTIONS:
         user = user.replace(sentence, DIRECT_ANSWER_INSTRUCTION)
@@ -150,9 +177,16 @@ def build_vqa_prompt(
     question: str,
     *,
     scene_graph: Optional[str] = None,
-    profile: str = "supplementary_concise",
+    profile: str = "gom_v2_concise",
 ) -> Tuple[str, str]:
-    """Return system and user text for a controlled VQA condition."""
+    """Return system and user text for a controlled VQA condition.
+
+    Default is ``gom_v2_concise``: the empirically best mark-aware prompt. It
+    tells the model the drawn object-ID tags (``person_1``, bare numbers) and
+    relation-arrow words are pointers, not answers -- so the VLM does not copy
+    the label tags. Pass ``profile=`` to override (e.g. ``paper_declared`` for
+    verbatim paper reproduction).
+    """
     if profile not in PROMPT_PROFILES:
         raise ValueError(f"Unknown prompt profile: {profile}")
     if mode not in {"raw", "visual", "visual_textual"}:
@@ -170,11 +204,14 @@ def build_vqa_prompt(
             "gom_v2_concise",
             "gom_v3_concise",
             "gom_v3b_concise",
+            "gom_v4_concise",
         }:
             user = _directify(user)
         return SYSTEM_RAW, user
 
-    if profile in {"gom_v2_concise", "gom_v3_concise", "gom_v3b_concise"}:
+    if profile in {
+        "gom_v2_concise", "gom_v3_concise", "gom_v3b_concise", "gom_v4_concise"
+    }:
         if mode == "visual_textual":
             # text_graph sends a clean image + triples: the mark explanation
             # would be false there, so fall back to the direct textual prompt.
@@ -190,6 +227,8 @@ def build_vqa_prompt(
             return SYSTEM_GOM_V3, USER_GOM_V3.format(question=question)
         if profile == "gom_v3b_concise":
             return SYSTEM_GOM_V3B, USER_GOM_V2.format(question=question)
+        if profile == "gom_v4_concise":
+            return SYSTEM_GOM_V4, USER_GOM_V4.format(question=question)
         return SYSTEM_GOM_V2, USER_GOM_V2.format(question=question)
 
     if mode == "visual_textual":

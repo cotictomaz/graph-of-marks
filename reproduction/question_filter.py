@@ -106,12 +106,30 @@ def curation_reason(question: str, answers) -> str | None:
     return None
 
 
-def keep_ids(rows) -> set:
+# The spatial/relational slice: the questions GoM exists to help with. Reported
+# alongside the full set, never instead of it -- the slice is where a marked scene
+# graph can pay for the pixels it covers, and where it currently costs the most
+# (GQA left/right: gemma 61.4 raw -> 30.7 marked).
+_SPATIAL_RE = re.compile(
+    r"\b(?:left|right|above|below|behind|under|underneath|beneath|beside|"
+    r"between|inside|outside|top|bottom|nearest|closest|farthest)\b|"
+    r"\bin front of\b|\bon top of\b|\bnext to\b|\bnear\b|\bwhich side\b"
+)
+
+
+def is_spatial(question: str) -> bool:
+    return bool(_SPATIAL_RE.search((question or "").lower()))
+
+
+def keep_ids(rows, mode: str = "appearance") -> set:
     """question_ids of rows that survive the filter (rows: canonical eval rows)."""
     kept = set()
     for row in rows:
         answers = row.get("answers") or ([row["answer"]] if row.get("answer") else [])
-        if appearance_reason(row["question"], answers) is None:
+        if mode == "spatial":
+            if is_spatial(row["question"]):
+                kept.add(row["question_id"])
+        elif appearance_reason(row["question"], answers) is None:
             kept.add(row["question_id"])
     return kept
 

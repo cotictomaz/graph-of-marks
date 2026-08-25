@@ -26,6 +26,8 @@ import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.bezier import BezierSegment
+from matplotlib.path import Path as MplPath
 from matplotlib.transforms import Bbox
 from PIL import Image
 
@@ -163,6 +165,12 @@ class VisualizerConfig:
     # Object rendering options
     show_segmentation: bool = True
     fill_segmentation: bool = True
+    # Contour strokes below this are holes, specks or mask noise rather than object
+    # boundary. Both floors apply; the fraction handles large objects, the pixel
+    # floor handles small ones. Without them cv2 returns every hole boundary and
+    # every speck, which is what rendered masks as scribbles.
+    min_contour_area_px: float = 60.0
+    min_contour_area_frac: float = 0.005
     show_bboxes: bool = True
 
     # Performance optimization flags
@@ -247,6 +255,13 @@ class VisualizerConfig:
 # VISUALIZER
 # ===============================================================
 
+# Ceiling on arc3 curvature. Calibrated, not guessed: on the densest real scene in
+# the set (overlapping kitchen appliances) 1.0 leaves a 20 px shaft and one arrow
+# still under the 25 px readability floor, 1.4 leaves 35 px and none, and 1.8 buys
+# nothing further while bowing the arc further from the pair it describes.
+_MAX_ARC_RAD = 1.4
+
+
 class Visualizer:
     """
     Comprehensive visualization engine for object detection, segmentation, and relationships.
@@ -278,6 +293,19 @@ class Visualizer:
         cfg: Configuration object controlling all visualization parameters
         SPATIAL_KEYS: Tuple of recognized spatial relationship predicates
     """
+
+    # A relation label further than this from its own arc is "unbound": the leader
+    # line still makes it traceable, but the reader has to work for it. Gated by
+    # reproduction/check_render_quality.py.
+    #
+    # 72 px = one spiral ring past the on-arc ladder, and it is CALIBRATED, not
+    # chosen: over all 3,975 curated images the worst drift run-wide is 66 px, on
+    # 4 images (0.10%), every one of them carrying a leader line back to its arc.
+    # The defect this guards against is the gom_v3 behaviour -- up to 200 px with
+    # no leader at all -- so the threshold is set to catch drift back toward that,
+    # not to chase zero. A finer 24-angle spiral was tried and rejected: it fixed
+    # only 1 of the 4 while changing renders on unrelated images.
+    REL_LABEL_BIND_PX = 72.0
 
     SPATIAL_KEYS = (
         "left_of",
@@ -396,26 +424,57 @@ class Visualizer:
         relations = self._preprocess_relations(relationships, boxes)
 
         # 3) draw passes
+        # reset before _draw_objects: that is where contours are counted
+        self._contours_drawn = []
         self._draw_objects(ax, boxes, masks, labels, scores, colors, image)
-        avoid_objects = self._build_avoid_patches(ax, boxes) if self.cfg.avoid_object_occlusion else []
+        # Invisible per-box rects: label obstacles for the legacy placer, and the
+        # clip patches that keep arrows out of the objects they point at.
+        box_patches = self._build_avoid_patches(ax, boxes)
+        avoid_objects = box_patches if self.cfg.avoid_object_occlusion else []
 
         self._placed_label_bbs = []
+        self._reserved_bbs = []
+        self._rel_label_distances = []
+        self._rel_label_dropped = 0
+        self._arrow_shafts_px = []
         if self.cfg.deterministic_label_placement:
-            arrow_polylines = (
-                self._predicted_arrow_polylines_px(ax, relations, boxes)
+            # Arrows first: their heads are reserved in the registry before any
+            # label is seated, which is what keeps the heads visible. Placing
+            # labels first forced the old code to *predict* arrow paths and to
+            # bury the arrows at zorder 6.5 under every label box.
+            arrows = (
+                self._draw_arrows(ax, relations, boxes, colors, box_patches)
                 if self.cfg.display_relationships
                 else []
             )
+            self._reserved_bbs = [self._arrow_head_bbox_px(a) for a in arrows]
+            # Relation labels are seated before object labels. An object label has
+            # its own box as an anchor and a leader-line convention; a relation
+            # label has only its arc, and going second left it the leftovers --
+            # up to 200 px off the arc it names.
+            if self.cfg.display_relation_labels:
+                for arrow in arrows:
+                    self._place_relation_label_deterministic(ax, arrow)
             obj_texts = self._draw_labels_deterministic(
                 ax, boxes, labels, scores, masks, colors, image,
-                arrow_polylines=arrow_polylines,
+                arrow_paths=[
+                    a.get_path().transformed(a.get_transform()) for a in arrows
+                ],
             )
         else:
             # Draw object labels first and collect them
             obj_texts = self._draw_labels(ax, boxes, labels, scores, masks, colors, image, avoid_objects=avoid_objects)
-
-        # Draw relationships and avoid object labels
-        self._draw_relationships(ax, relations, boxes, colors, obj_texts, avoid_objects=avoid_objects)
+            # Draw relationships and avoid object labels
+            self._draw_relationships(ax, relations, boxes, colors, obj_texts, avoid_objects=avoid_objects)
+            # Measure the heads here too, so `arrowhead_occluded_count` is a real
+            # number on this path rather than a vacuous 0. The legacy placer does
+            # not avoid them, so it is expected to be non-zero.
+            self._reserved_bbs = [
+                self._arrow_head_bbox_px(patch)
+                for patch in ax.patches
+                if isinstance(patch, patches.FancyArrowPatch)
+                and hasattr(patch, "_gom_rel")
+            ]
 
         self._record_label_placement(fig)
 
@@ -859,23 +918,198 @@ class Visualizer:
         if mask_uint8.max() == 1:
             mask_uint8 *= 255
 
-        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        # RETR_EXTERNAL, not RETR_CCOMP: CCOMP also returns every interior HOLE
+        # boundary, and this loop strokes each one at full weight inside the object.
+        # Together with the absence of any area floor that is what renders a flock
+        # of sheep as scribbles. The legacy monolith did this correctly
+        # (all_in_one_gom.py:1983, RETR_EXTERNAL + largest contour); the refactor
+        # into this module lost it, and since the gom_v* profiles draw outline-only
+        # the scribble is the entire visual.
+        #
+        # An area floor rather than largest-only: a genuinely two-part object -- a
+        # sheep split by a fence post -- should keep both parts.
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return
 
+        total_area = float(sum(cv2.contourArea(c) for c in contours))
+        min_area = max(
+            float(self.cfg.min_contour_area_px),
+            total_area * float(self.cfg.min_contour_area_frac),
+        )
+        drawn = 0
         for cnt in contours:
+            if cv2.contourArea(cnt) < min_area:
+                continue
             cnt = cnt.squeeze()
             if cnt.ndim != 2 or len(cnt) < 3:
                 continue
+            drawn += 1
             # Fill mask region with transparency
             if do_fill:
                 ax.fill(cnt[:, 0], cnt[:, 1], color=color, alpha=alpha_to_use, zorder=zorder)
             # Draw opaque border for definition
             ax.plot(cnt[:, 0], cnt[:, 1], color=color, linewidth=linewidth, alpha=1.0, zorder=zorder + 0.1)
+        self._contours_drawn = getattr(self, "_contours_drawn", []) + [drawn]
 
     # ===========================================================
     # RELATIONSHIP RENDERING
     # ===========================================================
+    def _draw_arrows(
+        self,
+        ax: plt.Axes,
+        relationships: Sequence[Dict[str, Any]],
+        boxes: Sequence[Sequence[float]],
+        colors: Sequence[str],
+        box_patches: Sequence[Any] = (),
+    ) -> List[patches.FancyArrowPatch]:
+        """Draw one arrow per relation; return the patches with geometry attached.
+
+        Endpoints are the bbox centroids with a small fixed trim. They are NOT
+        clipped to the box patches: gom_v4 did that, and it deleted the shaft on
+        52.9% of arrows run-wide, because for the median short pair the centroid
+        distance is only 0.89x the summed box half-extents -- the chord lies inside
+        the two boxes and clipping leaves nothing. Head visibility does not depend
+        on clipping; it comes from reserving the head bbox in the label registry
+        (`_reserved_bbs`), which the placers treat as a hard constraint. Measured
+        on real graphs: dropping the clip leaves heads-hidden at 0 while the median
+        shaft goes 16 px -> 53 px.
+
+        Curvature is adaptive for the residual overlapping/nested pairs, which no
+        amount of endpoint handling can help.
+        """
+        cfg = self.cfg
+        centers = [
+            ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
+            for b in boxes
+        ]
+        half = [
+            max(1.0, min(float(b[2]) - float(b[0]), float(b[3]) - float(b[1])) / 2.0)
+            for b in boxes
+        ]
+        arrows: List[patches.FancyArrowPatch] = []
+        counts: Dict[Tuple[int, int], int] = {}
+        for rel in relationships:
+            try:
+                src, tgt = int(rel["src_idx"]), int(rel["tgt_idx"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (0 <= src < len(centers) and 0 <= tgt < len(centers)):
+                continue
+            counts[(src, tgt)] = counts.get((src, tgt), 0) + 1
+            color = colors[src]
+            rad = self._arrow_curvature(
+                centers[src], centers[tgt], half[src], half[tgt],
+                counts[(src, tgt)] - 1,
+            )
+            arrow = patches.FancyArrowPatch(
+                centers[src],
+                centers[tgt],
+                arrowstyle="->",
+                color=color,
+                alpha=1.0,
+                linewidth=cfg.rel_arrow_linewidth,
+                connectionstyle=f"arc3,rad={rad}",
+                mutation_scale=cfg.rel_arrow_mutation_scale,
+                shrinkA=6.0,
+                shrinkB=6.0,  # points: keep the ends off the centroids, nothing more
+                zorder=6.5,  # below object ID labels (7); the head is reserved instead
+            )
+            arrow.set_path_effects(
+                [
+                    path_effects.Stroke(
+                        linewidth=cfg.rel_arrow_linewidth + 2.5, foreground="white"
+                    ),
+                    path_effects.Normal(),
+                ]
+            )
+            ax.add_patch(arrow)
+            arrow._gom_rel = rel
+            arrow._gom_color = color
+            arrow._gom_ends = (centers[src], centers[tgt])
+            arrow._gom_count = counts[(src, tgt)] - 1
+            arrow._gom_text = self._humanize_relation(
+                str(rel.get("display_relation") or rel.get("relation", "")).lower()
+            )
+            arrows.append(arrow)
+        if arrows:
+            # mutation_scale is only converted to pixels at draw time, so the arrow
+            # path is not real geometry until this runs.
+            ax.figure.canvas.draw()
+            self._arrow_shafts_px = [self._arrow_shaft_length_px(a) for a in arrows]
+        return arrows
+
+    @staticmethod
+    def _arrow_curvature(
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        half_a: float,
+        half_b: float,
+        repeat: int,
+    ) -> float:
+        """arc3 rad for this pair: bow harder when the objects nearly coincide.
+
+        An arc3 curve deviates from its chord by about rad*|chord|/2, so to bow
+        clear of a box of half-extent h the rad must reach ~2h/|chord|. For
+        overlapping or nested pairs that demand is unbounded (median 1.83, p90 3.52
+        across the run), so this is capped -- curvature alone cannot fix those, it
+        only has to make the arc distinguishable from a straight line through both
+        objects. The real fix for short shafts is not clipping the endpoints.
+        """
+        distance = math.hypot(end[0] - start[0], end[1] - start[1])
+        base = 0.2 + 0.1 * repeat
+        if distance < 1.0:
+            return min(_MAX_ARC_RAD, base + 0.8)
+        needed = 2.0 * (max(half_a, half_b) + 12.0) / distance
+        return float(min(_MAX_ARC_RAD, max(base, needed)))
+
+    def _arrow_head_bbox_px(self, arrow) -> Bbox:
+        """Display-space box covering the arrow head plus its white halo.
+
+        The head is the last subpath of the mutated arrow path -- matplotlib
+        concatenates shaft and head wedge (see ArrowStyle._Curve.transmute).
+        """
+        path = arrow.get_path().transformed(arrow.get_transform())
+        codes = path.codes
+        start = 0
+        if codes is not None:
+            movetos = np.flatnonzero(np.asarray(codes) == MplPath.MOVETO)
+            if len(movetos):
+                start = int(movetos[-1])
+        head = np.asarray(path.vertices[start:], dtype=float)
+        pad = (self.cfg.rel_arrow_linewidth + 2.5) / 2.0 * arrow.figure.dpi / 72.0
+        return Bbox.from_extents(
+            head[:, 0].min() - pad, head[:, 1].min() - pad,
+            head[:, 0].max() + pad, head[:, 1].max() + pad,
+        )
+
+    def _arrow_shaft_length_px(self, arrow) -> float:
+        """Drawn length of the arc minus the head wedge, in display px.
+
+        This is the number that decides whether a reader can see which way the
+        arrow points; a head on its own conveys position but not direction.
+        """
+        verts = np.asarray(
+            arrow.get_path().transformed(arrow.get_transform()).vertices, dtype=float
+        )
+        shaft = verts[:-3] if len(verts) > 4 else verts[:2]
+        return float(
+            sum(
+                math.hypot(shaft[i + 1][0] - shaft[i][0], shaft[i + 1][1] - shaft[i][1])
+                for i in range(len(shaft) - 1)
+            )
+        )
+
+    def _arrow_shaft_px(self, arrow) -> BezierSegment:
+        """The drawn arc (head wedge stripped) as a Bezier, in display px."""
+        # ponytail: arc3 always clips to one Bezier segment; a multi-segment
+        # connectionstyle would need MplPath.iter_segments here.
+        verts = np.asarray(
+            arrow.get_path().transformed(arrow.get_transform()).vertices, dtype=float
+        )
+        shaft = verts[:-3] if len(verts) > 4 else verts[:2]
+        return BezierSegment(shaft)
+
     def _draw_relationships(
         self,
         ax: plt.Axes,
@@ -919,77 +1153,22 @@ class Visualizer:
         if object_texts is None:
             object_texts = []
 
-        # Compute object centers for arrow endpoints
-        centers = [
-            ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
-            for b in boxes
-        ]
-
-        arrow_patches: List[patches.FancyArrowPatch] = []
         rel_texts: List[Any] = []
         rel_label_anchors: List[Tuple[float, float]] = []
         rel_label_dirs: List[Tuple[float, float]] = []
 
-        # Track multiple arrows between same pair for curvature adjustment
-        arrow_counts: Dict[Tuple[int, int], int] = {}
+        arrow_patches = self._draw_arrows(ax, relationships, boxes, colors, avoid_objects)
 
-        for rel in relationships:
-            src, tgt = int(rel["src_idx"]), int(rel["tgt_idx"])
-            if not (0 <= src < len(centers) and 0 <= tgt < len(centers)):
-                continue
-
-            start, end = centers[src], centers[tgt]
-            relation_name = str(
-                rel.get("display_relation") or rel.get("relation", "")
-            ).lower()
-            color = colors[src]
-
-            # Adjust curvature for multiple arrows between same objects
-            arrow_counts[(src, tgt)] = arrow_counts.get((src, tgt), 0) + 1
-            curvature = 0.2 + 0.1 * (arrow_counts[(src, tgt)] - 1)
-
-            # Shrink arrow endpoints to avoid covering object centers
-            p0, p1 = self._shrink_segment_px(start, end, 6, ax)
-            arrow = patches.FancyArrowPatch(
-                p0,
-                p1,
-                arrowstyle="->",
-                color=color,
-                alpha=1.0,
-                linewidth=cfg.rel_arrow_linewidth,
-                connectionstyle=f"arc3,rad={curvature}",
-                mutation_scale=cfg.rel_arrow_mutation_scale,
-                zorder=6.5,  # below object ID labels (7): arrows must not obscure them
-            )
-            arrow.set_path_effects(
-                [
-                    path_effects.Stroke(
-                        linewidth=cfg.rel_arrow_linewidth + 2.5,
-                        foreground="white",
-                    ),
-                    path_effects.Normal(),
-                ]
-            )
-            ax.add_patch(arrow)
-            arrow_patches.append(arrow)
-
-            if cfg.display_relation_labels and cfg.deterministic_label_placement:
-                readable = self._humanize_relation(relation_name)
-                t = self._place_relation_label_deterministic(
-                    ax, readable, p0, p1, color
-                )
-                if t is not None:
-                    rel_texts.append(t)
-                    rel_label_anchors.append(t.get_position())
-                    rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
-                continue
+        for arrow in arrow_patches:
+            p0, p1 = arrow._gom_ends
+            color = arrow._gom_color
 
             if cfg.display_relation_labels:
-                readable = self._humanize_relation(relation_name)
+                readable = arrow._gom_text
                 # Compute initial position at arc midpoint
                 pos = self._get_optimal_relation_label_position(ax, arrow, readable)
                 # Offset labels along the arrow normal to reduce collisions.
-                count = arrow_counts[(src, tgt)] - 1
+                count = arrow._gom_count
                 if cfg.relation_label_offset_px:
                     try:
                         to_px = ax.transData.transform
@@ -1046,10 +1225,9 @@ class Visualizer:
                 rel_label_dirs.append((p1[0] - p0[0], p1[1] - p0[1]))
 
         # Resolve overlaps between relationship labels, avoiding object labels.
-        # Skipped under deterministic placement: every label already sits in a
-        # verified-clear seat, and these passes are exactly what used to move a
-        # resolved label back on top of another one.
-        if cfg.resolve_overlaps and rel_texts and not cfg.deterministic_label_placement:
+        # Deterministic placement never reaches this method (draw() calls
+        # _draw_arrows + _place_relation_label_deterministic directly).
+        if cfg.resolve_overlaps and rel_texts:
             fig = ax.figure
             fig.canvas.draw()
             # Pass object_texts as fixed_texts to avoid overlapping them
@@ -1150,74 +1328,49 @@ class Visualizer:
         fig._gom_label_boxes = [tuple(bb.extents) for bb in boxes]
         fig._gom_label_overlap_count = overlaps
 
-    @staticmethod
-    def _arc3_polyline(
-        start: Tuple[float, float],
-        end: Tuple[float, float],
-        rad: float,
-        samples: int = 24,
-    ) -> List[Tuple[float, float]]:
-        """Sample matplotlib's arc3 connection as a polyline (same control point)."""
-        x1, y1 = start
-        x2, y2 = end
-        cx = (x1 + x2) / 2.0 + rad * (y2 - y1)
-        cy = (y1 + y2) / 2.0 - rad * (x2 - x1)
-        points = []
-        for step in range(samples + 1):
-            t = step / samples
-            u = 1.0 - t
-            points.append(
-                (
-                    u * u * x1 + 2 * u * t * cx + t * t * x2,
-                    u * u * y1 + 2 * u * t * cy + t * t * y2,
-                )
+        # Arrowheads: reserved before any label was seated, so this must be 0.
+        # `label_overlap_count` alone passed renders whose every head was buried
+        # under a label box, which is what the gom_v3 flip gallery showed.
+        heads = list(getattr(self, "_reserved_bbs", []) or [])
+        fig._gom_arrowhead_occluded_count = sum(
+            1
+            for h in heads
+            if any(
+                h.overlaps(bb)
+                and min(h.x1, bb.x1) - max(h.x0, bb.x0) > 0.5
+                and min(h.y1, bb.y1) - max(h.y0, bb.y0) > 0.5
+                for bb in boxes
             )
-        return points
+        )
+        seated = list(getattr(self, "_rel_label_distances", []) or [])
+        fig._gom_relation_label_dropped_count = int(
+            getattr(self, "_rel_label_dropped", 0)
+        )
+        fig._gom_relation_label_unbound_count = sum(
+            1 for d in seated if d > self.REL_LABEL_BIND_PX
+        )
+        fig._gom_relation_label_max_dist_px = max(seated) if seated else 0.0
 
-    def _predicted_arrow_polylines_px(
-        self,
-        ax: plt.Axes,
-        relationships: Sequence[Dict[str, Any]],
-        boxes: Sequence[Sequence[float]],
-    ) -> List[List[Tuple[float, float]]]:
-        """Arrow paths in display px, computed BEFORE any arrow patch exists.
-
-        Object labels are placed before `_draw_relationships` runs, so the only way
-        they can avoid arrows is to predict them. The geometry is deterministic:
-        bbox centers plus the same curvature rule the drawing code uses.
-        """
-        if not relationships:
-            return []
-        centers = [
-            ((float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0)
-            for b in boxes
-        ]
-        counts: Dict[Tuple[int, int], int] = {}
-        polylines: List[List[Tuple[float, float]]] = []
-        for rel in relationships:
-            try:
-                src, tgt = int(rel["src_idx"]), int(rel["tgt_idx"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if not (0 <= src < len(centers) and 0 <= tgt < len(centers)):
-                continue
-            counts[(src, tgt)] = counts.get((src, tgt), 0) + 1
-            rad = 0.2 + 0.1 * (counts[(src, tgt)] - 1)
-            data_pts = self._arc3_polyline(centers[src], centers[tgt], rad)
-            polylines.append([tuple(p) for p in ax.transData.transform(data_pts)])
-        return polylines
-
-    @staticmethod
-    def _bbox_crosses_polyline(bb, polyline: Sequence[Tuple[float, float]]) -> bool:
-        for px, py in polyline:
-            if bb.x0 <= px <= bb.x1 and bb.y0 <= py <= bb.y1:
-                return True
-        return False
+        # Arrow shafts: a head on its own shows position but not direction. gom_v4
+        # clipped endpoints to the box boundary and left 52.9% of arrows with a
+        # shaft under 25 px; this makes that checkable per render.
+        shafts = list(getattr(self, "_arrow_shafts_px", []) or [])
+        fig._gom_arrow_shaft_min_px = min(shafts) if shafts else 0.0
+        fig._gom_arrows_short_count = sum(1 for v in shafts if v < 25.0)
+        # Contours: >1 per mark means a genuinely multi-part object; a large number
+        # means hole boundaries or specks are being stroked again.
+        contours = list(getattr(self, "_contours_drawn", []) or [])
+        fig._gom_mask_contours_max = max(contours) if contours else 0
 
     def _registry_overlap(self, bb) -> float:
-        """Total overlap area of bb against every already-placed label box."""
+        """Overlap area of bb against every placed label box and reserved arrow head.
+
+        Heads live in a separate list so they never count as *label* overlaps:
+        `_record_label_placement` reads `_placed_label_bbs` only, so
+        `label_overlap_count` keeps meaning label-vs-label.
+        """
         total = 0.0
-        for other in self._placed_label_bbs:
+        for other in (*self._placed_label_bbs, *getattr(self, "_reserved_bbs", ())):
             if bb.overlaps(other):
                 ix = min(bb.x1, other.x1) - max(bb.x0, other.x0)
                 iy = min(bb.y1, other.y1) - max(bb.y0, other.y0)
@@ -1234,7 +1387,7 @@ class Visualizer:
         colors: Sequence[str],
         image: Image.Image,
         *,
-        arrow_polylines: Sequence[Sequence[Tuple[float, float]]] = (),
+        arrow_paths: Sequence[Any] = (),
     ) -> List[Any]:
         """Place every object label in one pass with a hard no-overlap constraint.
 
@@ -1322,8 +1475,12 @@ class Visualizer:
                     continue  # hard constraint: never overlap another label
                 if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
                     continue
+                # Soft: a shaft passing under a label box is still readable. Only
+                # the head is hard, and it is hard via the registry (_reserved_bbs);
+                # making the whole shaft hard starves the seat search on dense
+                # scenes and drops the object IDs the VLM actually reads.
                 crosses = any(
-                    self._bbox_crosses_polyline(bb, poly) for poly in arrow_polylines
+                    p.intersects_bbox(bb, filled=False) for p in arrow_paths
                 )
                 foreign = sum(
                     1
@@ -1411,63 +1568,80 @@ class Visualizer:
                     )
         return placed_texts
 
-    def _place_relation_label_deterministic(
-        self,
-        ax: plt.Axes,
-        text: str,
-        p0: Tuple[float, float],
-        p1: Tuple[float, float],
-        color: str,
-    ):
-        """Seat a relation label on its own arrow without overlapping any label.
+    def _place_relation_label_deterministic(self, ax: plt.Axes, arrow):
+        """Seat a relation label on its own arc, clear of every label and head.
 
-        Candidates walk along the arrow (so the label stays attached to the relation
-        it names) and step off along the normal. The registry already holds every
-        object label and every relation label placed so far, so the first clear
-        candidate is collision-free by construction.
+        Candidates walk the *drawn* arc (not the chord, which on a curved arrow is
+        already off the visible path) biased toward the head half, so the label's
+        own position tells the reader which end the arrow points at. Any seat more
+        than one text height off the arc gets a leader line back to its anchor, so a
+        far seat stays unambiguous instead of becoming a floating word.
         """
         cfg = self.cfg
-        fig = ax.figure
-        canvas_w, canvas_h = fig.canvas.get_width_height()
-        to_px = ax.transData.transform
+        text, color = arrow._gom_text, arrow._gom_color
+        canvas_w, canvas_h = ax.figure.canvas.get_width_height()
         to_data = ax.transData.inverted().transform
 
         w_txt, h_txt = self._estimate_text_px(ax, text, cfg.rel_fontsize)
-        pad = 5.0
-        w_px, h_px = w_txt + 2 * pad, h_txt + 2 * pad
+        w_px, h_px = w_txt + 10.0, h_txt + 10.0
+        curve = self._arrow_shaft_px(arrow)
 
-        a_px, b_px = np.array(to_px(p0)), np.array(to_px(p1))
-        v = b_px - a_px
-        length = float(np.hypot(v[0], v[1])) or 1.0
-        normal = np.array([-v[1], v[0]]) / length
+        def _at(t: float) -> np.ndarray:
+            return np.asarray(curve.point_at_t(min(max(t, 0.0), 1.0)), dtype=float)
 
+        def _seat(centre):
+            bb = Bbox.from_extents(
+                centre[0] - w_px / 2.0,
+                centre[1] - h_px / 2.0,
+                centre[0] + w_px / 2.0,
+                centre[1] + h_px / 2.0,
+            )
+            if self._registry_overlap(bb) > 0.0:
+                return None
+            if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
+                return None
+            return bb
+
+        anchor = _at(0.62)
         chosen = None
-        for t_along in (0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78):
-            base = a_px + v * t_along
-            for magnitude in (0.0, 12.0, 20.0, 30.0, 42.0, 56.0, 72.0):
+        for t_along in (0.62, 0.5, 0.74, 0.38, 0.84, 0.28):
+            base = _at(t_along)
+            tan = _at(t_along + 0.05) - _at(t_along - 0.05)
+            normal = np.array([-tan[1], tan[0]]) / (float(np.hypot(*tan)) or 1.0)
+            for magnitude in (0.0, 12.0, 20.0, 30.0, 42.0, 52.0):
                 for sign in ((1.0, -1.0) if magnitude else (1.0,)):
                     centre = base + normal * magnitude * sign
-                    bb = Bbox.from_extents(
-                        centre[0] - w_px / 2.0,
-                        centre[1] - h_px / 2.0,
-                        centre[0] + w_px / 2.0,
-                        centre[1] + h_px / 2.0,
-                    )
-                    if self._registry_overlap(bb) > 0.0:
-                        continue
-                    if bb.x0 < 0 or bb.y0 < 0 or bb.x1 > canvas_w or bb.y1 > canvas_h:
-                        continue
-                    chosen = (centre, bb)
-                    break
+                    bb = _seat(centre)
+                    if bb is not None:
+                        chosen = (centre, bb, base)
+                        break
                 if chosen:
                     break
             if chosen:
                 break
 
         if chosen is None:
-            return None  # no clear seat: drawing it would create the overlap we forbid
+            # Every seat along the arc is taken. Spiral out from the arc anchor
+            # rather than dropping the label: a relation with no name on it is a
+            # worse render than a named one on a leader.
+            step = max(h_px * 0.55, 10.0)
+            for ring in range(1, 60):
+                for angle_i in range(12):
+                    ang = angle_i * math.pi / 6.0
+                    centre = anchor + np.array(
+                        [math.cos(ang), math.sin(ang)]
+                    ) * step * ring
+                    bb = _seat(centre)
+                    if bb is not None:
+                        chosen = (centre, bb, anchor)
+                        break
+                if chosen:
+                    break
+        if chosen is None:
+            self._rel_label_dropped = getattr(self, "_rel_label_dropped", 0) + 1
+            return None  # nowhere on the canvas is free
 
-        centre, bb = chosen
+        centre, bb, base = chosen
         pos = tuple(to_data(centre))
         label = ax.text(
             pos[0],
@@ -1488,6 +1662,20 @@ class Visualizer:
             zorder=9,
         )
         self._placed_label_bbs.append(bb)
+        label._gom_arc_anchor = tuple(base)
+        drift = float(np.hypot(*(centre - base)))
+        self._rel_label_distances = [*getattr(self, "_rel_label_distances", []), drift]
+        if drift > h_px:
+            ax.annotate(
+                "",
+                xy=tuple(to_data(base)),
+                xytext=pos,
+                arrowprops=dict(
+                    arrowstyle="-", color=color, alpha=0.8, linewidth=1.0,
+                    shrinkA=2, shrinkB=0,
+                ),
+                zorder=8,  # under the label box (9), over the arrows (6.5)
+            )
         return label
 
     def _label_bbox_px(
@@ -3097,37 +3285,6 @@ class Visualizer:
                 break
             new_pos += disp
         return tuple(new_pos)
-
-    def _shrink_segment_px(self, p0, p1, shrink_px, ax):
-        """
-        Shrink line segment by specified pixels from both ends.
-        
-        Useful for preventing arrows from overlapping with object boundaries.
-        Converts to pixel space, shrinks, then converts back to data coordinates.
-        
-        Args:
-            p0: Start point in data coordinates (x, y)
-            p1: End point in data coordinates (x, y)
-            shrink_px: Number of pixels to shrink from each end
-            ax: Matplotlib axes for coordinate transformation
-        
-        Returns:
-            Tuple of (new_p0, new_p1) in data coordinates
-        
-        Notes:
-            - Returns original points if segment length < 1 pixel
-            - Preserves segment direction
-            - Useful for arrow placement to avoid box boundaries
-        """
-        to_px = ax.transData.transform
-        to_data = ax.transData.inverted().transform
-        P0, P1 = np.array(to_px(p0)), np.array(to_px(p1))
-        v = P1 - P0
-        L = np.linalg.norm(v)
-        if L < 1:
-            return p0, p1
-        v /= L
-        return tuple(to_data(P0 + v * shrink_px)), tuple(to_data(P1 - v * shrink_px))
 
     def _pixels_to_data(self, ax, dx_px, dy_px):
         """

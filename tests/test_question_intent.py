@@ -109,3 +109,30 @@ def test_question_answer_options_never_become_detector_queries():
     assert "cheeseburger" in parse_question_intent(
         "Is the person eating a cheeseburger or a sandwich?"
     ).detector_queries
+
+
+def test_who_questions_query_person_subtypes_not_bare_person():
+    """Every GQA "who ...?" gold is a person subtype (man/woman/boy/girl), and
+    OWLv2 stamps the query string onto the mark. Querying only "person" made the
+    mark person_1, which scores 0 when the model reads the tag; man_1 normalizes
+    to "man 1" and the phrase-level scorer accepts it."""
+    queries = parse_question_intent("Who is wearing a jacket?").detector_queries
+    for subtype in ("man", "woman", "boy", "girl"):
+        assert subtype in queries, f"{subtype} missing from {queries}"
+
+
+def test_noun_ambiguous_object_words_survive_the_verb_stoplist():
+    """"Who is wearing a watch?" never queried "watch": it is in _META_WORDS as a
+    question verb, and the watch was therefore never marked."""
+    assert "watch" in parse_question_intent("Who is wearing a watch?").detector_queries
+
+
+def test_category_words_expand_to_members_that_actually_cover_the_data():
+    """Two gaps the flip gallery found: a van marked `bus_2`, and a lettuce
+    marked `vegetable_1` while its neighbours carried real class names."""
+    vehicles = parse_question_intent("What vehicle is on the road?").detector_queries
+    assert "van" in vehicles and "vehicle" not in vehicles
+    vegetables = parse_question_intent(
+        "What is the vegetable to the left of the sponge?"
+    ).detector_queries
+    assert "lettuce" in vegetables and "vegetable" not in vegetables

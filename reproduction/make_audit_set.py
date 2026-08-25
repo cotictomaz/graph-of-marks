@@ -15,7 +15,7 @@ Strata (deterministic - first N by curated-selection order in each bucket):
   openvocab      question nouns outside the closed visual ontology
   dense          images whose first-pass graph had many detections
   small          questions about small objects
-plus every flip case listed in FLIP_AUDIT_GOM_V2.md.
+plus every flip case listed in FLIP_EXAMPLES_PAPER_GOM.md (the gom_v3 gallery).
 """
 from __future__ import annotations
 
@@ -31,30 +31,30 @@ from question_filter import load_question_intent_module  # noqa: E402
 
 QI = load_question_intent_module()
 
-# (dataset, image stem, question) triples from the gom_v2 flip gallery.
+# (dataset, image stem, question) triples from the gom_v3 flip gallery
+# (FLIP_EXAMPLES_PAPER_GOM.md) -- the cases the gom_v4 fixes must move.
 FLIP_CASES = [
-    ("gqa", "2375522", "Who stands next to the person the window behind of?"),
-    ("gqa", "2387333", "Who is in front of the house?"),
-    ("gqa", "2333988", "Who is wearing a jacket?"),
-    ("gqa", "2397817", "Who is wearing the hat?"),
-    ("gqa", "2326540", "Do you see vans to the left of the bus on the left?"),
-    ("gqa", "2411991", "Do you see skiers to the left of the bag in the center?"),
-    ("gqa", "2365147", "Is the teddy bear that is to the left of the cheeseburger sitting in a toy car?"),
-    ("gqa", "2411265", "Is there any elephant in the zoo?"),
-    ("gqa", "2385364", "Is the open can to the left or to the right of the shelf the towels are on?"),
-    ("gqa", "2376638", "Are the books of the coffee table to the left or to the right of the couch?"),
-    ("gqa", "2322351", "Is the towel to the left or to the right of the cabinet that is on the right side of the photo?"),
-    ("gqa", "2353443", "Is the computer to the left of books?"),
-    ("gqa", "2368619", "Is the girl to the left of a woman?"),
-    ("gqa", "2383493", "What kind of animal is the water behind of?"),
-    ("gqa", "2369075", "What is the dessert that is to the right of the table?"),
-    ("gqa", "2340160", "What kind of furniture does the pillow lie on top of?"),
-    ("gqa", "2413895", "Does the dark cat appear to be standing or lying?"),
-    ("gqa", "2346478", "What type of food is to the right of the wine on the right?"),
-    ("gqa", "2401706", "What kind of animal is to the left of the zebra that is eating grass?"),
-    ("gqa", "2369026", "What type of instrument is to the right of the person?"),
+    ("gqa", "2347957", "Who is wearing a jacket?"),
+    ("gqa", "2348675", "Who is holding the racket in the center?"),
+    ("gqa", "2380524", "Who is wearing a tee shirt?"),
+    ("gqa", "2408238", "Who is wearing a watch?"),
+    ("gqa", "2341832", "Do you see benches to the right of the bottle that is not open?"),
+    ("gqa", "2315568", "Do you see a ladle next to the computer that is sitting on the floor?"),
+    ("gqa", "2389557", "Is the smiling person above a bench?"),
+    ("gqa", "2370503", "Is the bicycle behind the tree in the field?"),
+    ("gqa", "2403371", "Is the truck to the left or to the right of the bench on the right?"),
+    ("gqa", "2361897", "Is the ball to the left or to the right of the man that is wearing socks?"),
+    ("gqa", "2367686", "Is the speaker to the right or to the left of the man?"),
+    ("gqa", "2315716", "Do you see people to the left of the tall palm trees?"),
+    ("gqa", "2376059", "Are there bottles to the right of the doll?"),
+    ("gqa", "2378259", "Is the water bottle to the right of a refrigerator?"),
+    ("gqa", "2346557", "Are the oranges to the right of the other oranges unpeeled or peeled?"),
+    ("gqa", "2372647", "What is the vegetable that is to the left of the sponge?"),
+    ("gqa", "713865", "What vehicle is to the left of the vehicle on the sidewalk?"),
+    ("gqa", "2319253", "What type of fruit is to the right of the food on the left side?"),
+    ("gqa", "2378694", "What is the man wearing?"),
+    ("gqa", "2380400", "What is the person in front of the trees throwing?"),
 ]
-
 QUOTA = {
     "who": 10,
     "existence_yes": 8,

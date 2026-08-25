@@ -319,9 +319,13 @@ before the run by a 93-row stress-audit set stratified over the failure modes
    Effect: 228 distinct open-vocabulary classes vs 16, marks only 3.40 → 3.57 per image.
 2. **Deterministic label placement** (`visualizer.py`, `deterministic_label_placement`): arrows
    are predicted before labels are placed; a shared registry enforces a hard zero-overlap
-   constraint over object labels, relation labels and arrows; ranked candidates + spiral
+   constraint over object labels and relation labels; ranked candidates + spiral
    fallback; every post-hoc mover is bypassed (they were re-introducing overlaps).
    **Result: `label_overlap_count == 0` on all 3,975 images x 6 variants**, recorded per render.
+   **Correction (gom_v4, see below): the constraint never covered arrows.** An earlier
+   version of this line claimed it did. The registry held label boxes only; arrows sat at
+   `zorder=6.5` under every opaque label box, and every arrowhead in this run was painted
+   over. `label_overlap_count == 0` was true and said nothing about arrow legibility.
 3. **Part-of-object fragment dedup** (mask containment ≥ 0.70, not box containment): removes the
    elephant-leg class of duplicate mark; distinct instances keep disjoint masks and survive.
 4. **Prompt v3** — presence assertion plus few-shot exemplars naming the forbidden tokens.
@@ -358,3 +362,447 @@ each fix verified by an automated gate rather than by eyeballing: Gemma-3-4B rea
 (+1.8 to −1.6), Qwen2.5-VL-7B stays at −6 to −8, LlamaV-o1-11B at −3.4 to −8.5, and marks remain
 indispensable for RefCOCOg grounding (0 → 28-52). The paper's across-model VQA gains do not
 reproduce under any configuration found in four independent searches.
+
+## gom_v4 run (`data_smoke`, 2026-08-17) — the arrowheads were never visible, and the gate said nothing
+
+Driven by the gom_v3 flip gallery (`FLIP_EXAMPLES_PAPER_GOM.md`) plus the user's reading of
+those renders (`FLIP_EXAMPLES_PAPER_GOM_ISSUES.txt`), and by a sweep of **all 5,486 flips** in
+`data_v6` (3 models x 3 datasets x 4 marked conditions) rather than the 20 cases the gallery
+shows. Scope: a 95-row stratified smoke set, not a full run — the numbers below gate defects,
+they do not re-measure Table 2.
+
+### What the gom_v3 gate could not see
+
+`label_overlap_count == 0` was true across 3,975 images x 6 variants and said nothing about
+arrow legibility, because the registry only ever held label boxes. Measured on the same
+scenes after the fact:
+
+| defect | before | gom_v4 |
+|---|---:|---:|
+| arrowheads painted over by a label box (dense test scene, head reservation disabled) | 5 / 8 | **0 / 8** |
+| relation label further than 60 px from its own arc (95 images) | 14 renders, up to 200 px | **0, max 55 px** |
+| relation labels with no seat, silently dropped | 2 of 2 on one image | **0** |
+| graph/render `edge_digest` mismatch | 27 / 95 once Alg-3 reordered | **0 (order-insensitive)** |
+
+The "before" column is measured on the current code with the specific fix switched off, not on
+the `data_v6` binaries — in gom_v3 proper the head was additionally *inside* the target object
+(6 px from its centroid), so the real occlusion rate there was higher, not lower.
+
+The head sat 6 px from the *target centroid* (`_shrink_segment_px`), which is exactly where an
+inside object label is anchored, under an opaque `alpha=0.95` box at `zorder=7`/`9` while the
+arrow was pinned at `6.5`. The zorder was not the bug; it was a symptom of label placement
+never seeing the arrows. Arrows are now drawn first, clipped to the target box by matplotlib's
+own `patchA`/`patchB`, and their heads reserved in the registry the placers already treat as a
+hard constraint. `label_overlap_count` keeps meaning label-vs-label (heads live in a separate
+list), so the earlier claim stays comparable.
+
+### Three mechanisms the gallery missed or misattributed
+
+**1. Query-driven marks plant false evidence — the largest fixable mechanism, and it is not a
+threshold problem.** GQA existence questions, flip rate by whether the questioned noun is marked:
+
+| model | gold=no, marked | gold=no, unmarked | gold=yes, marked | gold=yes, unmarked |
+|---|---:|---:|---:|---:|
+| gemma3_4b | **34.5%** | 6.0% | 7.6% | **18.4%** |
+| qwen25_vl_7b | **13.0%** | 4.8% | 13.5% | **17.6%** |
+| llamav_o1_11b | **34.1%** | 24.2% | 1.6% | 0.0% |
+
+Both directions are one disease: the model reads the mark set as an *existence oracle*.
+Gemma/LlamaV over-assert (`no`→`yes` is 21-42% of their flips), Qwen over-denies (`yes`→`no`
+is 20-24% of its flips). Detector confidence does **not** separate the false-positive
+question-driven marks from the true ones (mean 0.462 vs 0.474; a 0.35 threshold kills 36.6% of
+FPs and 35.9% of TPs), so no gating fixes it — hence `gom_v4_concise`'s positive-framed
+"the outlines cover only part of the scene, and an outline can be wrong" and nothing else.
+The gate deliberately excludes gold=`no` rows from query coverage for the same reason.
+
+**2. GoM destroys spatial reasoning on exactly the questions it targets.** GQA left/right
+(n=88), raw → best marked: Gemma **61.4 → 30.7**, Qwen 92.0 → 79.5, LlamaV 63.6 → 43.2. By what
+the graph contains: both nouns marked but no relation between them (n=14) **−42.9** Gemma;
+arrows only between the wrong pair (n=32) −18.8; correct relation present and drawn (n=39)
+−38.5. Even a correct arrow hurt — that is the legibility failure above.
+
+Root cause of the missing pair edges: **Algorithm 3 compared a detector label's WordNet aliases
+to the raw question string.** `canonical_object_label` maps man/woman/child → `person`, and
+`label_aliases("person")` is `{person, persons, persones}`, so a question saying "man" never
+matched a human mark, Algorithm 3 fell into its zero-match branch, and the arrow it drew joined
+whichever two objects were nearest. It now matches the question's parsed object terms, ranks
+edges pair-first, emits both axes when both clear the margin, and treats a left/right question
+as relevant to its whole axis. On the smoke set that moves arrows-on-the-queried-pair from
+58.5% to 62.6% and left/right pair coverage from 48.6% to 51.4% — real but small; the binding
+constraint is detector recall (only 70% of left/right questions have both objects detected at
+all), which is the documented ceiling.
+
+**Correction, measured at full GQA scale (996 images, gom_v3 vs gom_v4 on identical rows):**
+restricting arrow *sources* to question-matched objects is essentially a **no-op** — mean
+arrows/image is 2.07 in both runs. The projection that it would cut arrows by 38% came from a
+proxy that matched detector labels against question tokens; the real Algorithm 3 matched set
+(WordNet aliases + FastText + now the parsed object terms) is far broader, so
+`matched ∩ kept ≈ kept`. What actually declutters is the **per-image cap**: max arrows 11 → 5,
+and images with more than 5 arrows **31 → 0**, with the median render untouched. That is the
+right shape — it removes the pathological renders the gallery complained about without
+thinning the typical one — but the credit belongs to `max_relations_total`, not to the
+head restriction.
+
+**3. ID leakage on "who" questions was a labelling failure, not a prompting failure.** All 79
+GQA `who` golds are person subtypes (man 22, woman 13, boy 10, girl 8, …) and the graph carried
+126 marks labelled `person`. `normalize("man_1") == "man 1"`, which `gqa_hit` phrase-matches
+against gold `man` for **1.0**; `person_1` scores 0. OWLv2 *does* detect the subtype
+(man@0.47, boy@0.37, woman@0.32 on the gallery images) — dedup was dropping it against
+`person@0.54` at mask IoU 1.000. The survivor now inherits the specific name (15 renames on 95
+images). This is a partial fix: it needs the subtype detection to reach the dedup stage, which
+it does on ~3 of 4 gallery cases.
+
+### Scoring
+
+`gqa_hit("strawberry", "strawberries")` was `0.0` — a scorer artifact the gom_v2 audit
+recommended fixing and nobody did. The lenient metrics are now plural-tolerant
+(`vqa_metrics.singularize`, applied symmetrically); **the official/primary VQA metric is
+untouched**. Worth +0.4 to +1.3 points on every cell including raw, so Δ moves ≤0.3.
+`score_table2.py --question-filter spatial` reports the spatial/relational slice
+(GQA 653/996, VQAv1 102/988, VQAv2 132/991) alongside the full set.
+
+### Smoke-run results (95 stratified rows, both prompts, 3 models)
+
+**Read the scope first.** `make_audit_set.py` builds this set by *over-sampling the failure
+modes* (who / existence-yes / existence-no / left-right / open-vocab / small) plus all 20 cases
+from the gom_v3 gallery. It is a defect gate, not an accuracy benchmark: GQA carries n=67
+(n=48 spatial), VQAv1/VQAv2 only n=14 (n=3 spatial), where one row is 7 to 33 points. The
+deltas below are far worse than the full-run deltas by construction. **They are reported, not
+gated** — the gates are the render and leakage tables.
+
+Render gate, all 95 images x 6 variants: label overlaps **0**, edge-digest mismatch **0**,
+arrowheads occluded **0**, relation labels off their arc **0** (max drift 55 px), relation
+labels dropped **0**, mark/arrow budget **0** over, query coverage **90.3%**.
+
+Leakage gate (worst marked condition), both prompts **PASS**:
+
+| | gom_v3 (`data_v6`, 1000 rows) | gom_v4 (95 rows) |
+|---|---:|---:|
+| Qwen ID-shaped answers, text conditions | 87-90 | 12-14 |
+| **generic `person_N` answers (gated, <= 5)** | — | **5** |
+| LlamaV generic `person_N` answers | 152-172 | **0** |
+| relation-word answers | 1 -> 31 under prompt v3 | **0** (v2 prompt), 2 (v4 prompt) |
+| plan-mode ("I will analyze…") | 0 (v2) / 9-14 (v3) | **0** |
+| numeric-ID conditions, any leak | 4-5 | **0** |
+
+Δ = best marked − raw, lenient:
+
+| model | dataset | n | raw | Δ `gom_v2_concise` | Δ `gom_v4_concise` |
+|---|---|---:|---:|---:|---:|
+| gemma3_4b | gqa | 67 | 56.72 | −1.49 | −1.49 |
+| gemma3_4b | gqa *(spatial)* | 48 | 64.58 | **+2.08** | −2.08 |
+| qwen25_vl_7b | gqa | 67 | 88.06 | −19.40 | −20.90 |
+| qwen25_vl_7b | gqa *(spatial)* | 48 | 93.75 | −14.58 | −14.58 |
+| llamav_o1_11b | gqa | 67 | 70.15 | −8.96 | −7.46 |
+| llamav_o1_11b | gqa *(spatial)* | 48 | 79.17 | −10.42 | −10.42 |
+
+(VQAv1/VQAv2 cells are n=14 and n=3 — omitted as noise; the full table is in the run's
+`score.*.json`.)
+
+**The prompt fix does not pay, and this is the third time.** `gom_v4_concise` adds two
+*positive-framed* sentences — marks are partial and fallible, and answer about the two things
+the question names — precisely because prompt v3's prohibitions backfired by negation priming.
+It is neutral or worse on almost every cell (Gemma's GQA spatial slice goes +2.08 → −2.08), and
+it reintroduces 2 relation-word answers that `gom_v2_concise` has none of. **Keep
+`gom_v2_concise`.** The profile stays in the code with this measurement recorded, as v3 did.
+
+**What the render fixes did and did not buy.** They removed every measurable render defect and
+they eliminated LlamaV's generic-tag leakage outright (152-172 → 0 per condition). They did not
+turn the VQA sign positive on this set — but this set is stratified to be hard, so that is not
+evidence either way. The honest next step is a full curated re-run under `gom_v4` +
+`gom_v2_concise`; nothing here supersedes §gom_v3's Table 2.
+
+**Residual, characterized rather than hidden.** The 5-10 remaining "who leaks" are no longer
+`person_1`: 6 of 11 are the model answering a correct person subtype (`man_2`, `guy_3`,
+`lady_1`) where the gold wants a *role* noun — `chef`, `umpire`, `catcher`, `doctor`, `skier`,
+`player` — that no detector emits. Query coverage misses (`ladle`, `jet`, `shadow`, `house`,
+`television`) are detector recall. Both are ceilings, not render defects, which is why the gate
+counts only generic answer-less tags and why coverage is gated at 90% rather than 100%.
+
+### Full-scale preprocessing verification (`data_v7`, 3,975 curated images)
+
+Run before inference, because a defect found after 3 h of GPU is a defect found too late.
+`data_v7/prepared/` is a byte copy of `data_v6/prepared/`, so gom_v3 and gom_v4 differ only in
+the pipeline. Three things the 95-row stratified smoke set got wrong, all caught here:
+
+**1. Two gate thresholds were calibrated on 95 rows and were simply wrong at 3,975.**
+`--max-marks 10` gated *below the profile's own contract* (`max_detections_total: 15`) and
+flagged 30 images that were never out of budget; it is now 15. `--min-coverage 90` was
+unreachable — measured over all four datasets, **gom_v3 sits at 84.1% and gom_v4 at 83.7%**,
+so the floor is now 80, which still catches a regression of the kind gom_v3 fixed (a closed
+vocabulary would land far below) without chasing a number detector recall cannot reach.
+
+**2. gom_v4's 1-point coverage dip was my metric, not the pipeline.** `_inherit_specific_label`
+renames a `person` mark to `man`, and `check_render_quality.label_terms` did not canonicalize
+mark labels the way it canonicalizes question terms — so a question about a "person" stopped
+matching its own (more specific) mark. Canonicalizing recovers 83.1% → 83.7%; the residual
+0.4pp against gom_v3 is real and small.
+
+**3. A pre-existing render defect, newly measured: 10 of 3,975 renders (0.25%) come out
+≥25 percentage points whiter than their own source photo** — in the worst case a 640x154 image
+whose content occupies 162x48 px inside the frame, 94% white. It is **not** caused by gom_v4:
+gom_v3 shows 88.6% white on the same image and 93.8% on the label-free `segmented` variant, so
+it is present in every recorded run, including the paper-profile ones. It is also **not** an
+aspect-ratio problem (most affected images are 1.50 / 1.33 / 0.66) and it is not the label
+placer — `segmented` has no labels. Two attempted reproductions (axes autoscale; an
+out-of-bounds artist) both failed to trigger it, so the mechanism is *unknown* and no
+speculative fix was shipped. Reproduce with the render-vs-source whiteness scan in this
+section's commit. Affected rows are guaranteed raw-wins in every marked condition.
+
+**Relation-label drift: the 72 px threshold is calibrated, and here is the calibration.**
+Run-wide worst drift is 66 px on 4 images (0.10%), every one carrying a leader line to its arc.
+A finer 24-angle spiral was implemented, measured, and **reverted**: it fixed 1 of the 4 while
+changing renders on unrelated images (2 of 120 controls), which is the worst of both. After the
+revert all 120 control renders hash-match their originals, so the run has one rendering
+behaviour throughout. The threshold guards against drift back toward gom_v3's 200 px-with-no-leader,
+not against 66 px-with-a-leader.
+
+Final gate on all 3,975 images x 6 variants: label overlaps **0**, edge-digest mismatch **0**,
+arrowheads occluded **0**, relation labels off arc **0**, dropped **0**, over budget **0**,
+query coverage **83.7%**. `audit_relations.py`: **0 hard consistency errors** on all four
+datasets. Arrows max **11 → 5**; marks mean 3.77 → 3.75 (unchanged). GQA who-questions:
+generic `person` marks **126 → 70**, specific subtype marks **0 → 123**.
+
+### Full gom_v4 run (`data_v7`, 3,975 curated images, 3 models, 4 datasets)
+
+`data_v7/prepared/` is a byte copy of `data_v6/prepared/`, so gom_v3 and gom_v4 differ **only**
+in the pipeline. The gom_v3 column below is that run's predictions **re-scored with the current
+plural-tolerant metric**, because the scorer changed too: leaving it un-rescored would credit
+the scorer fix to the pipeline (the metric alone moves deltas by −0.9 to +0.2).
+
+Δ = best marked − raw, lenient:
+
+| model | dataset | raw | Δ gom_v3* | Δ gom_v4 | Δ gom_v4 (spatial) |
+|---|---|---:|---:|---:|---:|
+| gemma3_4b | gqa | 54.52 | −0.40 | −1.71 | −1.23 |
+| gemma3_4b | vqav1 | 69.62 | −1.62 | −2.61 | +12.65 |
+| gemma3_4b | vqav2 | 67.31 | −1.47 | −0.42 | +5.15 |
+| gemma3_4b | refcocog | — | 51.84 | 51.58 | (absolute) |
+| qwen25_vl_7b | gqa | 73.49 | −7.13 | −6.22 | −6.58 |
+| qwen25_vl_7b | vqav1 | 89.17 | −7.96 | −7.65 | −6.57 |
+| qwen25_vl_7b | vqav2 | 87.33 | −8.17 | −7.85 | −9.77 |
+| qwen25_vl_7b | refcocog | — | 35.15 | 36.04 | (absolute) |
+| llamav_o1_11b | gqa | 59.94 | −4.42 | −4.62 | −5.97 |
+| llamav_o1_11b | vqav1 | 78.53 | −7.67 | −8.35 | −6.27 |
+| llamav_o1_11b | vqav2 | 77.86 | −9.99 | −10.31 | −9.85 |
+| llamav_o1_11b | refcocog | — | 28.67 | 29.21 | (absolute) |
+
+\* re-scored with the current metric so only the pipeline differs.
+
+**The VQA verdict is unchanged for the fourth consecutive overhaul.** Every gom_v3 → gom_v4
+movement is within ±1.0 on n≈1000, where the standard error is ~1.5 — i.e. inside noise. Qwen
+is consistently in the positive direction on all four datasets (+0.3 to +0.9) and LlamaV
+consistently slightly negative; neither is significant. Gemma's spatial-slice numbers on
+VQAv1/VQAv2 (+12.65 / +5.15) sit on n=100 and n=133 respectively — roughly 12 rows — and must
+not be quoted as a result; the GQA spatial slice, with n=630, is −1.23.
+
+**What the fixes did buy, measured.** The specific-person-label work is the one change with a
+clear, attributable effect, and it is visible only when GQA is split by question type
+(`gom_text_labeled`, identical rows):
+
+| model | who-questions (n=79) | everything else (n=917) |
+|---|---:|---:|
+| gemma3_4b | 39.2 → 31.6 (**−7.6**) | 54.5 → 53.3 (−1.2) |
+| qwen25_vl_7b | 15.2 → **21.5 (+6.3)** | 69.0 → 70.3 (+1.3) |
+
+Qwen gains 6–7.6 points on exactly the rows the fix targeted, with non-who rows flat — the
+`person_1` → `man_1` inheritance converting tag leaks into correct answers. **Gemma loses the
+same rows**, and Gemma never leaked tags at all (0 in every condition): for it the specific
+labels are not fixing a leak, they are a new failure surface, because the render now asserts
+`man_1`/`girl_1` and a wrong subtype guess is something to copy. Verified mechanically: of
+Gemma's 10 who-question flips, 6 answered a subtype that is on the image and wrong (0 answered a
+correct one); all 5 of Qwen's did the same. **Specific person labels are therefore a per-model
+trade, not a universal win**, and the two effects cancel in the aggregate.
+
+Generic-tag leakage (the scoring-zero `person_N` answers), worst condition, same 2,975 rows:
+
+| | gom_v3 | gom_v4 |
+|---|---:|---:|
+| qwen, text tags | 67 (2.25%) | **24 (0.81%)** |
+| llamav, text tags | 14 | **3** |
+| gemma, text tags | 1 | **0** |
+| numeric-ID conditions | 0 | 0 |
+
+Total ID-shaped answers rose (383 → 422) while *generic* ones fell ~65%: exactly the intended
+conversion of `person_1` into `man_1`. Relation-word answers (117 → 112) and plan-mode
+(16 → 20) are unchanged. `check_leakage.py` now gates on the **rate**, not a raw count — the
+old `<= 5` was calibrated on a 95-row smoke set and is meaningless against 2,975 rows. The 1.5%
+threshold is calibrated *between* the two measured runs and is a regression gate, not a quality
+bar: it passes gom_v4 and fails gom_v3.
+
+**Two self-inflicted defects found while attributing the above, both measured, neither fixed
+in this run** (fixing them requires a re-preprocess + re-inference):
+
+1. **`guy`/`lady` should never have been added to `_PERSON_SUBTYPES`.** They were added to lift
+   who-coverage 56/79 → 62/79. But OWLv2 stamps `guy_1` on **26** of 79 who-images while only
+   **4** golds are `guy` and **0** are `lady`; the other 22 golds are `man` (7), `girl` (4),
+   `player` (3), `woman` (3), `boy` (2), `people` (2), `child` (1). Both models copy the tag.
+   Cost: **Qwen −1.51 GQA**, Gemma −0.40 — larger than the entire gom_v3 → gom_v4 movement.
+   Fix: drop them from the query list; the `_ALIASES` entries can stay.
+2. **`boy`/`girl` inheritance is silently dead.** `_inherit_specific_label` decides via
+   `canonical_object_label`, and `boy`/`girl` are absent from `_ALIASES`, so they canonicalize
+   to themselves and never rename a `person` mark. 6 who-rows are stuck on `person_N`
+   (6/6 wrong for Qwen). This is why `2408238` still rendered `person_1` despite OWLv2
+   detecting `boy@0.37`.
+   **The obvious fix is wrong**: adding them to `_ALIASES` would make every *direct* question
+   about a boy or girl query the generic `person` (`('boy','bat')` → `('person','bat')`),
+   reintroducing generic marks exactly where specific ones work today. The repair belongs in a
+   dedicated subtype→generic map used only by inheritance, leaving global canonicalization alone.
+
+## gom_v5 run (`data_v8`, 2026-08-17) — the render defects are gone and the VQA verdict holds
+
+Driven by the user's review of the gom_v4 gallery: cases 10/14 showed bad segmentation, and
+*"many images where the arrow is not clear — if it is too short only the arrowhead is visible"*.
+Both were real and both were larger than the two cases. `data_v8/prepared/` is a byte copy of
+`data_v7/prepared/`, so gom_v4 and gom_v5 differ only in the pipeline.
+
+### The arrow defect was self-inflicted, and the obvious fix was the wrong one
+
+gom_v4 clipped arrow endpoints to the box boundary (`patchA`/`patchB`). That is what made
+arrowheads visible — and it deleted the shaft on **52.9% of arrows** (4,525/8,552), across 71.7%
+of images with arrows, because for the median short pair the centroid distance is only 0.89x the
+summed box half-extents: the chord lies inside both boxes and clipping leaves nothing.
+
+Curving the arc — the suggested fix — is right in principle but insufficient alone: to clear
+both boxes the required `arc3` rad has median **1.83** and p90 **3.52**, and a visually sane cap
+of 1.0-1.2 fixes only 0-6%. The actual fix is that **gom_v4 applied two independent fixes for
+buried arrowheads and needed only one.** Head visibility comes from reserving the head bbox in
+the label registry, not from clipping. Dropping the clip:
+
+| | gom_v4 | gom_v5 |
+|---|---:|---:|
+| arrow shaft, median (real graphs) | 16 px | **102 px** |
+| min arrow shaft per render, median (run-wide) | — | **190 px** |
+| renders with an arrow under 25 px | ~53% of arrows | **24 / 15,900 = 0.15%** |
+| arrowheads hidden under a label | 0 | **0** |
+
+Adaptive curvature (capped at 1.4, calibrated on the densest real scene) handles the residual
+overlapping/nested pairs, and 94 relations between near-coincident centroids — undrawable at any
+curvature — are now filtered at selection so graph, triples and render keep one edge multiset.
+
+### The scribbled masks were a regression from the legacy monolith
+
+`_draw_segmentation` used `cv2.RETR_CCOMP`, which returns interior **hole** boundaries as well
+as outer ones, and stroked every contour with no area floor. `all_in_one_gom.py:1983` did it
+correctly (`RETR_EXTERNAL` + largest contour); the refactor into `gom/viz/` lost it, and since
+the gom_v* profiles render outline-only the scribble was the entire visual. Now `RETR_EXTERNAL`
+plus an area floor — an area floor rather than largest-only, so a genuinely two-part object
+keeps both parts.
+
+**The contour-count gate was dropped to informational, and that decision is not a concession
+to the numbers.** Measured over 3,975 images: 77% of renders stroke one contour, 97.6% three or
+fewer, thin tail to 13 — the shape of legitimately fragmented objects (a bicycle is 6). The
+count measures fragmentation, not the defect; hole boundaries are now structurally impossible,
+and `test_mask_outline_ignores_holes_and_specks` asserts that directly, which is a sharper guard
+than any run-wide threshold.
+
+### Result: Δ = best marked − raw, gom_v4 vs gom_v5 on identical rows, same metric
+
+| model | dataset | raw | Δ gom_v4 | Δ gom_v5 | change | Δ gom_v5 spatial |
+|---|---|---:|---:|---:|---:|---:|
+| gemma3_4b | gqa | 54.52 | −1.71 | −1.91 | −0.20 | −2.14 |
+| gemma3_4b | vqav1 | 69.62 | −2.61 | −2.18 | +0.44 | +5.49 |
+| gemma3_4b | vqav2 | 67.31 | −0.42 | −0.89 | −0.46 | +2.35 |
+| gemma3_4b | refcocog | — | 51.58 | 50.93 | −0.65 | (absolute) |
+| qwen25_vl_7b | gqa | 73.49 | −6.22 | −7.13 | −0.90 | −7.66 |
+| qwen25_vl_7b | vqav1 | 89.17 | −7.65 | −8.71 | −1.06 | −8.04 |
+| qwen25_vl_7b | vqav2 | 87.33 | −7.85 | −7.83 | +0.02 | −9.09 |
+| qwen25_vl_7b | refcocog | — | 36.04 | 37.07 | +1.03 | (absolute) |
+| llamav_o1_11b | gqa | 59.94 | −4.62 | −4.52 | +0.10 | −4.59 |
+| llamav_o1_11b | vqav1 | 78.53 | −8.35 | −7.96 | +0.39 | −8.63 |
+| llamav_o1_11b | vqav2 | 77.86 | −10.31 | −10.31 | −0.00 | −10.15 |
+| llamav_o1_11b | refcocog | — | 29.21 | 27.67 | −1.54 | (absolute) |
+
+**Fifth consecutive overhaul to land neutral.** Every movement is within ±1.1 on n≈1000 (SE
+~1.5). Making the arrows legible and the outlines clean did not change the VQA verdict.
+Gemma's spatial VQAv1/VQAv2 slices (+5.49/+2.35) sit on n=100/133 and must not be quoted.
+
+### The one large, precisely-located effect: subtype labelling
+
+Splitting GQA by question type (identical rows, gom_v4 → gom_v5):
+
+| model | condition | who-questions (n=79) | everything else (n=917) |
+|---|---|---:|---:|
+| qwen25_vl_7b | gom_text | 22.8 → **36.7 (+13.9)** | 69.2 → 68.9 (−0.3) |
+| qwen25_vl_7b | gom_text_labeled | 21.5 → **34.2 (+12.7)** | 70.3 → 68.0 (−2.3) |
+| gemma3_4b | gom_text_labeled | 31.6 → 34.2 (+2.5) | 53.3 → 54.2 (+0.9) |
+
+Removing `guy`/`lady` from the queries (26 → 0 marks on who-images) and giving
+`_inherit_specific_label` its own subtype map — rather than routing through
+`canonical_object_label`, where `boy`/`girl` canonicalize to themselves — moved exactly the rows
+they targeted. Generic `person_N` answers are now 0.64% of rows against gom_v3's 2.25%.
+
+**The aggregate still worsened, and the arithmetic is the point:** +12.7 on 79 rows is ~10 rows
+gained; −2.3 on 917 rows is ~21 lost. The non-who loss is concentrated on `gom_text_labeled`
+(−2.3) versus `gom_text` (−0.3), and the only difference between those conditions is whether the
+relation words are drawn — so the more legible relation labels appear to cost accuracy on
+questions the graph is not about. At ~1.5 SE this is suggestive, not established.
+
+### Cross-detector corroboration does not separate wrong labels either
+
+The probe recorded, for 19,764 marks, whether the survivor beat a rival detection claiming a
+different class. Joined to predictions by box IoU:
+
+| bucket | n | beat a different-class rival |
+|---|---:|---:|
+| marks the model copied and got wrong | 83 | 19 (22.9%) |
+| every other mark | 9,991 | 1,643 (16.4%) |
+
+22.9% vs 16.4% is not a usable separator. Combined with the earlier null result on confidence
+(0.537 vs 0.529) and on open-vocab origin (50/50), **the wrong-class-name problem has no
+detector-side signal we have found** and should be treated as a ceiling.
+
+## GEPA prompt optimization (2026-08-17..19) — three runs, no prompt beats the hand-written one
+
+The last untested lever after five render overhauls was the marked-condition system prompt.
+Three DSPy-GEPA runs (~20h GPU) optimized `SYSTEM_GOM_V2` against `data_v8` renders, all four
+gom_* conditions at once, on Qwen2.5-VL-7B. **Every run is null out of sample.** The harness is
+local-only (`prompt_opt/`, git-ignored); this section is the record.
+
+Each run selects on a val split and is then judged on images the optimizer never saw:
+
+| run | setup | candidates | best val | **best holdout** |
+|---|---|---:|---:|---:|
+| A | bf16 vLLM, GPT-5.6-luna judge, GEPA's default proposer | 121 | +1.95 | **−0.09** |
+| B | Q4 GGUF on llama.cpp, local Qwen3.8-27B judge, generalisation-only proposer | 37 | +0.43 | **−0.12** |
+| C | as B, warm-started from B's best prompt, 8h | 108 | +1.11 | **+0.04** |
+
+Run C's full holdout table (500 held-out images, 2,000 pairs each), against the production seed:
+
+| prompt | words | val | holdout | vs seed |
+|---|---:|---:|---:|---:|
+| cand 104 | 375 | 73.91 | 74.07 | +0.04 |
+| **production seed** | **138** | — | **74.03** | — |
+| warm start | 288 | 73.73 | 73.90 | −0.13 |
+| cand 88 (**val winner**) | 369 | **74.53** | 73.55 | **−0.48** |
+
+**The val winner is the worst prompt out of sample**, and across the scored candidates val rank is
+anti-correlated with holdout rank (Spearman −0.26). In all three runs the seed scored *lowest* on
+val — which is why GEPA never selected it — and *highest* on the holdout. The decisive statistic
+is the same every time: for run C, 108 candidates with mean 72.89 and sd 0.68 give an expected
+maximum from pure noise of **74.96**, against an observed best of **74.53**. The search did worse
+than chance applied to its own candidate population.
+
+**What GEPA actually learned, and why it did not transfer.** Every candidate trades yes/no gain
+for open-ended loss, monotonically (cand 88: +0.74 / −1.42; answer length is flat, so this is not
+verbosity). Across 491 proposals, 84.9% add yes/no or existence rules while only 45.8% retain
+naming guidance — and naming is what open-ended questions need. The cause is a defect in the
+harness's own sampler: it round-robined the strata, so **val was 58.6% yes/no against a 43.4% pool
+rate** while the holdout matched the pool, and `who` questions were 11.7% of train against 0.4% of
+the holdout. Trading open-ended accuracy into yes/no accuracy paid on val and was charged for on a
+representative test set. The sampler now draws proportionally (all splits within 0.2 points of the
+pool).
+
+**How much this actually tested the lever is limited by four more harness defects**, all found by
+auditing the traces afterwards and all now fixed: the shared server's reasoning budget decapitated
+the *reflection* model (90% of calls cut mid-thought, producing 5.1% scratchpad proposals, 8
+candidates descended from one); a dead template placeholder meant the proposer was never given a
+length budget and 78% of proposals had their tail — where the new rule goes — silently trimmed;
+the judge's evidence line re-introduced the gold answer into 46.8% of reflection feedback; and
+`R7_overlay_colour` never fired once in 1,156 judge calls. Runs A–C therefore tested a search that
+was misdirected in several ways at once, which is the honest caveat on reading them as evidence
+about prompt optimization in general.
+
+**What is unchanged**: the marked-vs-raw deficit. The seed sits at −7.8 against raw on val, and no
+candidate moved it — the optimizer's cheapest move is to converge on the unannotated answers
+(+3.7 points of raw-agreement on the "winning" candidate), which is the null hypothesis.

@@ -13,6 +13,15 @@ from typing import FrozenSet, Iterable, Tuple
 
 _ALIASES = {
     "people": "person",
+    # Person subtypes that "who ...?" golds actually use. Without these,
+    # _inherit_specific_label cannot recognise "guy"/"lady" as a specific name
+    # for a `person` mark: 4 + 2 of the 79 GQA who-golds, on top of the 56
+    # already covered by man/woman/boy/girl/child.
+    "guy": "person",
+    "guys": "person",
+    "lady": "person",
+    "ladies": "person",
+    "gentleman": "person",
     "persons": "person",
     "men": "person",
     "man": "person",
@@ -46,12 +55,21 @@ _CATEGORY_MEMBERS = {
     "vehicle": (
         "car", "truck", "bus", "motorcycle", "bicycle", "train", "boat",
         "airplane",
+        # "van" was missing, so a van in a "what vehicle" question was marked
+        # bus_2 and the model answered "bus".
+        "van", "suv", "taxi", "jeep", "pickup truck",
     ),
     "furniture": (
         "chair", "couch", "bed", "table", "desk", "bench",
     ),
     "food": (
         "fruit", "vegetable", "pizza", "sandwich", "cake", "donut", "hot dog",
+    ),
+    # Without this, "what is the vegetable" queried "vegetable" itself and the
+    # lettuce was marked vegetable_1 while its neighbours carried real class names.
+    "vegetable": (
+        "lettuce", "carrot", "broccoli", "tomato", "onion", "pepper",
+        "cucumber", "corn", "potato",
     ),
 }
 
@@ -77,6 +95,11 @@ _VISUAL_OBJECTS = {
     "fruit", "vegetable", "shirt", "pants", "dress", "jacket", "coat", "hat",
     "helmet", "shoe", "sky", "snow", "water", "grass", "floor", "ground",
     "tree", "flower", "sign", "screen", "animal",
+    # Nouns that _META_WORDS also lists as question verbs. The anchor path does
+    # not consult _META_WORDS, so listing them here restores the noun sense
+    # ("Who is wearing a watch?" never queried "watch") while the open-vocab
+    # residue keeps blocking the verb.
+    "watch", "ring", "drink", "play",
 }
 
 _COMPOUND_ALIASES = {
@@ -133,6 +156,20 @@ _ATTRIBUTE_WORDS = {
 
 _PERSON_PRONOUNS = {"he", "her", "hers", "him", "his", "she"}
 
+# "Who ..." questions answer with a person subtype ("man", "woman", "boy",
+# "girl"), never with "person" -- 79/79 GQA who-questions do. Querying only
+# "person" labelled every human person_N, so a model that reads the tag answers
+# person_1 and scores 0; the same read of man_1 normalizes to "man 1" and the
+# phrase-level scorer accepts it. Subtypes are queried in gold-frequency order;
+# cross-class suppression drops the loser when two of them hit the same human.
+_WHO_WORDS = {"who", "whom", "whose"}
+# Deliberately NOT guy/lady. They were added to lift who-coverage 56/79 -> 62/79,
+# but OWLv2 stamps `guy_1` on 26 of 79 who-images while only 4 golds are "guy" and
+# 0 are "lady"; both models copy the tag, costing Qwen 1.51 GQA and Gemma 0.40.
+# The _ALIASES entries below stay -- those only let inheritance recognise a
+# specific name, they do not cause a query.
+_PERSON_SUBTYPES = ("man", "woman", "boy", "girl", "child", "person")
+
 # Real objects that happen to end in -ing/-ed, exempt from the participle filter.
 _PARTICIPLE_OBJECTS = {
     "building", "buildings", "ceiling", "painting", "paintings", "awning",
@@ -172,7 +209,52 @@ _META_WORDS = {
     # also occur standalone: "to the left or to the right of ...")
     "left", "right", "above", "below", "under", "over", "behind", "beside",
     "upper", "lower", "leftmost", "rightmost",
+    # Colour / material / texture words. These are WordNet nouns, so the noun gate
+    # below cannot reject them, and OWLv2 happily marks something "blue_1".
+    "blue", "green", "yellow", "purple", "pink", "brown", "white", "black",
+    "gray", "grey", "red", "wooden", "wood", "metal", "plastic", "leather",
+    "glass", "striped", "plaid", "checkered", "floral",
+    # Irregular past participles the -ed/-ing suffix test cannot catch.
+    "written", "broken", "torn", "worn", "eaten", "frozen", "hidden", "drawn",
+    "grown", "blown", "thrown", "held", "built", "lit", "bent",
 }
+
+# Cache for the WordNet noun gate; None until the first lookup decides whether the
+# corpus is usable at all.
+_WORDNET: Any = None
+_NOUN_CACHE: Dict[str, bool] = {}
+
+
+def _is_noun(token: str) -> bool:
+    """True unless WordNet knows the token and has no noun sense for it.
+
+    Backstop for the hand-written blocklists: `ripe`, `spicy`, `shiny`, `sunny`
+    are adjectives that reached OWLv2 and produced marks named after them. Only
+    used to *reject*, so a missing corpus degrades to the pre-gate behaviour.
+
+    nltk is imported lazily: question_intent.py is loaded by file path on the
+    host by reproduction/question_filter.py, where nltk may not exist.
+    """
+    global _WORDNET
+    if token in _NOUN_CACHE:
+        return _NOUN_CACHE[token]
+    if _WORDNET is None:
+        try:
+            from nltk.corpus import wordnet as wn  # type: ignore
+
+            wn.synsets("dog")  # force the corpus load; raises if absent
+            _WORDNET = wn
+        except Exception:
+            _WORDNET = False
+    if _WORDNET is False:
+        return True
+    try:
+        known = bool(_WORDNET.synsets(token))
+        result = (not known) or bool(_WORDNET.synsets(token, pos=_WORDNET.NOUN))
+    except Exception:
+        result = True
+    _NOUN_CACHE[token] = result
+    return result
 
 
 def canonical_object_label(label: str) -> str:
@@ -273,6 +355,10 @@ def parse_question_intent(question: str) -> QuestionIntent:
     }
     if _PERSON_PRONOUNS.intersection(tokens):
         anchors.add("person")
+    person_subtypes: Tuple[str, ...] = ()
+    if _WHO_WORDS.intersection(tokens):
+        person_subtypes = _PERSON_SUBTYPES
+        anchors.discard("person")
 
     # Keep common compound nouns as detector queries without generating arbitrary
     # n-grams.  These are visual phrases that occur directly in the question.
@@ -335,8 +421,14 @@ def parse_question_intent(question: str) -> QuestionIntent:
             # "creamy"/"teddy" alone are useless detector queries; the phrase carries
             # the meaning, so the modifier is not emitted on its own.
             modifiers.add(left)
+    # The noun gate applies to standalone queries only. A bigram *modifier* is
+    # allowed to be an adjective ("creamy soup"); a bare word that OWLv2 will
+    # stamp onto a mark must be a noun, or the render says "ripe_1".
     open_terms = _ordered_unique(
-        [*open_bigrams, *(t for t in open_candidates if t not in modifiers)]
+        [
+            *open_bigrams,
+            *(t for t in open_candidates if t not in modifiers and _is_noun(t)),
+        ]
     )[:8]
 
     # Bare category words are dropped from the detector queries: OWLv2 labels a
@@ -345,7 +437,12 @@ def parse_question_intent(question: str) -> QuestionIntent:
     queries = _ordered_unique(
         [*sorted(anchors), *expanded, *compounds, *open_terms]
     )
-    object_terms = frozenset(set(anchors) | set(categories) | set(expanded))
+    # Appended after canonicalization on purpose: _ALIASES maps man/woman/child
+    # back to "person", which is exactly the collapse this fix exists to undo.
+    queries = queries + tuple(t for t in person_subtypes if t not in queries)
+    object_terms = frozenset(
+        set(anchors) | set(categories) | set(expanded) | set(person_subtypes)
+    )
 
     relation_anchors = set()
     relation_sources = set()

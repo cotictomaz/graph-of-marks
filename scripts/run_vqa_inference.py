@@ -75,7 +75,7 @@ def build_prompt(
     question: str,
     mode: str,
     scene_graph_text: Optional[str] = None,
-    profile: str = "paper_declared",
+    profile: str = "gom_v2_concise",
 ) -> tuple[str, str]:
     return build_vqa_prompt(
         mode,
@@ -104,7 +104,7 @@ def run_inference(
     image_dir: Optional[str],
     mode: str,
     sampling_params: SamplingParams,
-    prompt_profile: str = "paper_declared",
+    prompt_profile: str = "gom_v2_concise",
 ) -> list[dict]:
     results = []
 
@@ -165,7 +165,14 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-7B-Instruct")
     parser.add_argument("--mode", choices=["raw", "visual", "visual_textual"], default="visual_textual")
     parser.add_argument(
-        "--prompt-profile", choices=PROMPT_PROFILES, default="paper_declared"
+        "--prompt-profile",
+        choices=PROMPT_PROFILES,
+        default="gom_v2_concise",
+        help=(
+            "Default gom_v2_concise: mark-aware prompt that tells the model the "
+            "drawn ID tags and relation words are pointers, not answers. Use "
+            "paper_declared for verbatim paper reproduction."
+        ),
     )
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)  # greedy: lmms-eval VQA standard

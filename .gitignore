@@ -66,3 +66,15 @@ data_paper/
 paper_reference/
 reproduction/afk_runs/
 reproduction/queue_runs/
+
+# Local-only prompt optimization (never committed)
+prompt_opt/
+
+# Secrets and local machine state (never committed)
+.env.bak*
+.agents/
+.claude/
+
+# Regenerable flip galleries (rebuild via reproduction/make_flip_gallery.py)
+reproduction/flip_examples_gom_v4_images/
+reproduction/flip_examples_paper_gom_images/

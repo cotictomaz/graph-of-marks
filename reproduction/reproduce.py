@@ -137,6 +137,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt-profile", default="paper_declared")
     parser.add_argument(
+        "--question-filter",
+        choices=("none", "appearance", "spatial"),
+        default="none",
+        help=(
+            "Forward a question-type filter to scoring. 'none' (default) is the "
+            "faithful Table 2 set; 'appearance' drops color/material/text-in-image/"
+            "subjective questions; 'spatial' keeps only spatial/relational ones. "
+            "A non-'none' filter writes a separate ...{filter}.json report."
+        ),
+    )
+    parser.add_argument(
         "--setting",
         default="",
         help="Forward one explicit decoding setting (SEED,TEMPERATURE,TOP_P) to inference.",
@@ -144,7 +155,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--render-profile",
         default="paper_aaai26",
-        help="Preprocessing render profile (paper_aaai26 or a *_outline/*_lowfill variant).",
+        help=(
+            "Preprocessing render profile: paper_aaai26, a *_outline/*_lowfill "
+            "variant, or gom_v2/gom_v3/gom_v4 (gom_v4 is the current best -- "
+            "visible arrowheads, arc-bound relation labels, arrow cap)."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -643,6 +658,10 @@ def inference(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
 
 
 def score(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
+    question_filter = getattr(args, "question_filter", "none")
+    # A filter goes to a distinct report so it never clobbers the verified
+    # unfiltered table2_report.{prompt_profile}.json.
+    suffix = "" if question_filter == "none" else f".{question_filter}"
     command = [
         sys.executable,
         str(REPRODUCTION_ROOT / "score_table2.py"),
@@ -650,11 +669,13 @@ def score(args: argparse.Namespace, datasets: tuple[str, ...]) -> None:
         "--datasets", ",".join(datasets),
         "--models", args.models,
         "--output", str(
-            args.data_root / f"table2_report.{args.prompt_profile}.json"
+            args.data_root / f"table2_report.{args.prompt_profile}{suffix}.json"
         ),
         "--artifact-granularity", args.artifact_granularity,
         "--prompt-profile", args.prompt_profile,
     ]
+    if question_filter != "none":
+        command.extend(["--question-filter", question_filter])
     if args.one_per_image:
         command.append("--one-per-image")
     if args.single_setting:

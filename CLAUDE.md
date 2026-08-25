@@ -229,15 +229,98 @@ GQA+VQAv2) produced zero candidates even on train; final config pilots
 outcome-selected subsample "wins" are in `data_v3/showcase_rescues.*.json` and are
 diagnostic only.
 
+**gom_v5 (profile `gom_v5` + prompt `gom_v2_concise`, 2026-08-17, RESULTS.md §gom_v5) — the
+render defects are gone and the VQA verdict holds.** Driven by a review of the gom_v4 gallery.
+Two real defects, both larger than the cases that surfaced them, and **both self-inflicted**:
+gom_v4's endpoint clipping (`patchA`/`patchB`) deleted the arrow shaft on **52.9% of arrows**
+(the chord lies inside both boxes for the median short pair), and `_draw_segmentation` used
+`cv2.RETR_CCOMP`, stroking interior HOLE boundaries — a regression from `all_in_one_gom.py:1983`
+(`RETR_EXTERNAL` + largest contour) that the refactor lost. Fixes: **drop the clip** (head
+visibility comes from the label-registry reservation, not the clip — gom_v4 applied two fixes
+for one problem), adaptive curvature capped at 1.4, `RETR_EXTERNAL` + area floor, and 94
+undrawable relations between coincident centroids filtered at *selection* so graph/triples/render
+keep one edge multiset. Shaft median 16px → 190px run-wide; arrows under 25px 53% → **0.15%**.
+**Curving the arc alone cannot fix short arrows** — required rad median 1.83, p90 3.52, so a
+sane cap fixes 0-6%; the clip removal is what matters.
+**Result: fifth consecutive overhaul to land neutral** — every Δ moves within ±1.1 on n≈1000.
+The one large effect is subtype labelling: Qwen's who-questions **+13.9**, non-who flat, after
+removing `guy`/`lady` from the queries (26 → 0 marks) and giving `_inherit_specific_label` its
+own subtype map (routing through `canonical_object_label` silently never fired for `boy`/`girl`;
+aliasing them there would be *wrong* — it degrades every direct boy/girl query). Generic
+`person_N` answers 2.25% → 0.64%. Note the aggregate still worsens: +12.7 on 79 rows loses to
+−2.3 on 917, and that loss is concentrated on `gom_text_labeled` vs `gom_text` — i.e. where
+relation words are drawn. **Gate lessons:** the contour-count gate was demoted to informational
+(77% of renders stroke 1 contour, a bicycle legitimately has 6 — it measures fragmentation, not
+the hole-boundary bug, which a unit test now guards directly), and the arrow/label gates are
+rate-based, calibrated between the two runs. **Cross-detector corroboration is a dead end too**:
+copied-and-wrong marks beat a different-class rival 22.9% vs 16.4% baseline — no separation,
+matching the earlier nulls on confidence and open-vocab origin.
+
+**gom_v4 (profile `gom_v4` + prompt `gom_v4_concise`, 2026-08-17) — the gom_v3 flip gallery
+(`reproduction/FLIP_EXAMPLES_PAPER_GOM.md` + the user's `_ISSUES.txt`) driven to a clean
+render gate.** What the gom_v3 gate missed, because `label_overlap_count` only ever counted
+label-vs-label: **every arrowhead in that run was painted over by a label box**, and relation
+labels floated up to 200 px from the arc they name. Fixes, all in `visualizer.py`: arrows are
+drawn *first*, their endpoints clipped to the target box by matplotlib's `patchA`/`patchB`
+(so the head lands outside the object instead of 6 px from its centroid, under its ID label),
+their head bboxes reserved in the label registry before any label is seated, and relation
+labels seated on the *drawn* Bézier arc biased toward the head with a leader line past one
+text height. `_shrink_segment_px`, `_arc3_polyline`, `_predicted_arrow_polylines_px` and
+`_bbox_crosses_polyline` are deleted — the whole prediction layer existed only because labels
+used to be placed before arrows. Pipeline fixes: Algorithm 3 now matches detector labels
+against the question's **parsed object terms** (it compared WordNet aliases to the raw
+question, so "man" never matched a `person` mark and every human fell into the zero-match
+branch); relation ranking is pair-first, then relation type, then distance; both axes are
+emitted when both clear the margin; a left/right question makes its whole axis relevant;
+`max_relations_total` caps arrows per *image*; and a mark whose duplicate carried the
+question's specific name inherits it (`_inherit_specific_label` — `man@0.47` was being dropped
+against `person@0.54` at mask IoU 1.000, which is the single largest ID-leak mechanism).
+**`relation_digest` is now order-insensitive** — it was not, so any reordering in Algorithm 3
+made the graph and render disagree and inference hard-failed with "graph/render edge digest
+mismatch" *after* loading the model. New hard gates in `check_render_quality.py`:
+`edge_digest` consistency, `arrowhead_occluded_count`, `relation_label_unbound_count`,
+`relation_label_dropped_count`, plus mark/arrow budget and ≥90% query coverage
+(coverage skips gold=`no` rows on purpose — marking the queried noun there is the
+false-premise defect, not coverage). `check_leakage.py` gates scoring-zero `who` ID leaks.
+Lenient scoring is plural-tolerant (`vqa_metrics.singularize`); the official metric is
+untouched. `score_table2.py --question-filter spatial` reports the slice GoM exists for.
+`reproduction/make_flip_gallery.py` regenerates a gallery from a data root — the earlier
+galleries were assembled by hand, which is why they drifted from the runs they described;
+the current one is `FLIP_EXAMPLES_GOM_V4.md`.
+**Use profile `gom_v4` with prompt `gom_v2_concise`.** The matching `gom_v4_concise` prompt
+(two *positive-framed* sentences: marks are partial and fallible; answer about the two
+things the question names) was measured against it on the same renders and is neutral or
+worse on almost every cell, and reintroduces relation-word answers that `gom_v2_concise`
+has none of — the third time a prompt addition has failed here. It stays in the code with
+the measurement recorded, as `gom_v3_concise` did.
+**Full run done (`data_v7`, 3,975 curated images, 3 models, 4 datasets, RESULTS.md
+§"Full gom_v4 run").** Every render gate 0; `audit_relations.py` 0 hard errors. **The VQA
+verdict is unchanged for the fourth consecutive overhaul** — every gom_v3 → gom_v4 delta is
+within ±1.0 on n≈1000 (SE ~1.5), i.e. inside noise. Generic `person_N` answers fell ~65%
+(qwen text 67 → 24 of 2,975; llamav 14 → 3), while total ID-shaped answers rose 383 → 422 —
+the intended conversion of `person_1` into `man_1`. `check_leakage.py` now gates on the
+**rate** (1.5%, calibrated between the two runs); the old `<= 5` count was calibrated on 95
+rows and meaningless at 2,975. **Specific person labels are a per-model trade, not a win**:
+split by question type, Qwen gains +6.3 on who-questions (non-who flat) while Gemma *loses*
+−7.6 there, because Gemma never leaked tags and a wrong subtype guess is just something to
+copy. Do not quote Gemma's spatial VQAv1/VQAv2 slices (+12.65/+5.15) — n=100/133.
+**Two self-inflicted defects are recorded but NOT fixed in this run** (see RESULTS.md):
+`guy`/`lady` should never have entered `_PERSON_SUBTYPES` (26 marks, 4 matching golds; costs
+Qwen 1.51 GQA), and `boy`/`girl` inheritance is dead because it routes through
+`canonical_object_label` — and the obvious fix of aliasing them to `person` is *wrong*, it
+would degrade every direct boy/girl query. Both need a dedicated subtype map plus a re-run. Residual is characterized, not hidden: the remaining who-question leaks are the
+model naming a person subtype where the gold wants a role noun (`chef`, `umpire`,
+`catcher`), and the coverage misses (`ladle`, `jet`, `shadow`) are detector recall.
+
 **gom_v3 run (`data_v6`, 2026-08-17, RESULTS.md §gom_v3) — the render defects are fixed and
 the VQA verdict still holds.** Driven by a visual audit of all 20 gom_v2 flip cases
 (`reproduction/FLIP_AUDIT_GOM_V2.md`). Three pipeline fixes: open-vocabulary detector queries
 (`question_intent.py` — the closed `_VISUAL_OBJECTS` gate is dropped for queries, bare category
 words removed since OWLv2 labels a mark with the query string), **deterministic label placement**
 (`visualizer.py`, `deterministic_label_placement`; predicted arrow paths + shared registry +
-hard zero-overlap constraint + spiral fallback, all post-hoc movers bypassed →
-`label_overlap_count == 0` on 3,975 images × 6 variants, recorded per render in
-`*_render_variants.json` and checkable via `check_render_quality.py`), and mask-containment
+hard zero-overlap constraint **over labels only, not arrows** + spiral fallback, all post-hoc
+movers bypassed → `label_overlap_count == 0` on 3,975 images × 6 variants, recorded per render
+in `*_render_variants.json` and checkable via `check_render_quality.py`), and mask-containment
 fragment dedup (`same_class_fragment_containment`). Gate tooling: `make_audit_set.py` (93 rows
 stratified over who/existence/left-right/open-vocab/dense/small), `check_render_quality.py`,
 `check_leakage.py`. **Use profile `gom_v3` with prompt `gom_v2_concise`** — prompt v3's explicit

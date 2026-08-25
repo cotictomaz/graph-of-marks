@@ -90,3 +90,74 @@ def test_semantic_similarity_uses_best_query_token(tmp_path):
     sim._vectors = vectors
     score = sim("are there any horses", "horse")
     assert score > 0.9, f"best matching token should dominate, got {score}"
+
+
+def test_person_mark_matches_a_question_that_says_man():
+    """The silent failure that broke relation selection for every human mark.
+
+    Detector labels are canonicalized (man/woman/child -> person), so a question
+    saying "man" never lexically matched a `person` mark, Algorithm 3 fell through
+    to its zero-match branch, and the arrow it drew joined whichever two objects
+    happened to be nearest instead of the pair the question named.
+    """
+    labels = ["person", "tie", "speaker", "sky"]
+    relations = [
+        {"src_idx": 0, "tgt_idx": 2, "relation": "right_of"},
+        {"src_idx": 1, "tgt_idx": 3, "relation": "below"},
+    ]
+    kept, edges = filter_paper_graph(
+        labels, relations, question="Is the speaker to the left of the man?"
+    )
+    assert {labels[i] for i in kept} == {"person", "speaker"}
+    assert [e["relation"] for e in edges] == ["right_of"]
+
+
+def test_arrow_prefers_the_queried_pair_over_a_nearer_stranger():
+    """Ranking on relation type alone pointed a query object's arrow at whatever
+    neighbour was closest; 38% of left/right questions got an unrelated pair."""
+    labels = ["dog", "giraffe", "tree"]
+    relations = [
+        # the tree is much nearer, but it is not what the question is about
+        {"src_idx": 0, "tgt_idx": 2, "relation": "left_of", "distance": 5.0},
+        {"src_idx": 0, "tgt_idx": 1, "relation": "left_of", "distance": 400.0},
+    ]
+    _, edges = filter_paper_graph(
+        labels, relations, question="Is the dog to the left of the giraffe?"
+    )
+    assert [(labels[e["src_idx"]], labels[e["tgt_idx"]]) for e in edges] == [
+        ("dog", "giraffe")
+    ]
+
+
+def test_max_total_relations_bounds_the_whole_render():
+    """top_k_per_head bounds arrows per source, not per image."""
+    from gom.relations.paper import PaperRelationConfig
+
+    labels = ["dog", "cat", "bird", "horse", "sheep", "cow"]
+    relations = [
+        {"src_idx": i, "tgt_idx": (i + 1) % len(labels), "relation": "left_of",
+         "distance": float(i)}
+        for i in range(len(labels))
+    ]
+    question = "Are the dog, cat, bird, horse, sheep and cow to the left of each other?"
+    _, uncapped = filter_paper_graph(labels, relations, question=question)
+    _, capped = filter_paper_graph(
+        labels, relations, question=question,
+        config=PaperRelationConfig(top_k_per_head=1, max_total_relations=2),
+    )
+    assert len(uncapped) > 2
+    assert len(capped) == 2
+
+
+def test_left_right_question_makes_both_directions_relevant():
+    """"to the left or to the right of X" is one question about one axis, but the
+    phrase matcher returns a single term, so half of them ranked the asked-about
+    edge as irrelevant."""
+    from gom.relations.paper import _query_relation_terms
+
+    assert set(_query_relation_terms("Is A to the left or to the right of B?")) == {
+        "left_of", "right_of"
+    }
+    assert set(_query_relation_terms("Is A to the right of B?")) == {
+        "left_of", "right_of"
+    }

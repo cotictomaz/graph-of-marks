@@ -115,3 +115,34 @@ def test_relation_digest_includes_modifier():
         }
     ]
     assert relation_digest(plain) != relation_digest(touching)
+
+
+def test_both_axes_are_emitted_when_both_clear_the_margin():
+    """A left/right question about a vertically-dominant pair used to get an
+    `above` edge and no left/right edge at all."""
+    from gom.relations.paper import infer_paper_relations
+
+    # target is far below and clearly to the right: |dy| dominates, so only
+    # `above` used to be emitted. Convention: positive dx => source is left_of target.
+    boxes = [[0.0, 0.0, 10.0, 10.0], [100.0, 400.0, 110.0, 410.0]]
+    rels = infer_paper_relations(
+        boxes, labels=["dog", "cat"], depths=None, image_size=(500, 500)
+    )
+    out = {(r["src_idx"], r["tgt_idx"], r["relation"]) for r in rels}
+    assert (0, 1, "above") in out
+    assert (0, 1, "left_of") in out
+
+
+def test_relation_digest_ignores_edge_order():
+    """The graph records the digest from the selection list; the renderer records
+    it after a NetworkX round-trip, which re-orders edges by source node. Those
+    two agreed only by coincidence, and inference hard-fails on a mismatch."""
+    from gom.relations.paper import relation_digest
+
+    edges = [
+        {"src_idx": 2, "tgt_idx": 0, "relation": "above"},
+        {"src_idx": 0, "tgt_idx": 1, "relation": "left_of", "modifier": "touching"},
+        {"src_idx": 1, "tgt_idx": 2, "relation": "near"},
+    ]
+    assert relation_digest(edges) == relation_digest(list(reversed(edges)))
+    assert relation_digest(edges) != relation_digest(edges[:2])

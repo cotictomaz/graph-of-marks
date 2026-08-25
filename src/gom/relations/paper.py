@@ -48,6 +48,15 @@ class PaperRelationConfig:
     query_object_threshold: float = 0.50
     query_relation_threshold: float = 0.50
     top_k_per_head: int = 3
+    # Arrows per image, 0 = unbounded (published behaviour). top_k_per_head alone
+    # bounds arrows per source, not per render.
+    max_total_relations: int = 0
+    # An arrow between two objects whose centres nearly coincide cannot show a
+    # direction -- there is no drawable arc -- and "A below B" between coincident
+    # centres is dubious anyway. 204 of 8,552 arrows in data_v7 were like this.
+    # Filtered here, not at render time, so graph, triples and render keep the same
+    # edge multiset (run_table2.py hard-fails on an edge_digest mismatch).
+    min_centroid_separation_px: float = 0.0   # 0 = published behaviour
 
 
 def _center(box: Sequence[float]) -> Tuple[float, float]:
@@ -108,14 +117,29 @@ def infer_paper_relations(
             distance = math.hypot(dx, dy)
             pair_relations: List[Tuple[str, str]] = []
 
-            directional: Optional[str] = None
-            if abs(dy) >= abs(dx) and abs(dy) > config.direction_margin:
-                directional = "above" if dy > 0.0 else "below"
-            elif abs(dx) > config.direction_margin:
-                directional = "left_of" if dx > 0.0 else "right_of"
+            # Both axes are emitted when both clear the margin, dominant one first.
+            # Emitting only the dominant axis meant a left/right question about a
+            # vertically-offset pair got an `above` edge and no left/right edge at
+            # all -- 14 of 88 GQA left/right questions, the worst-performing bucket.
+            # Algorithm 3 ranks question-relevant relations first, so the asked-about
+            # axis wins the top-1 slot; with no relation term in the question the
+            # stable sort keeps the dominant axis, as before.
+            vertical = "above" if dy > 0.0 else "below"
+            horizontal = "left_of" if dx > 0.0 else "right_of"
+            directions: List[str] = []
+            if abs(dy) >= abs(dx):
+                if abs(dy) > config.direction_margin:
+                    directions.append(vertical)
+                if abs(dx) > config.direction_margin:
+                    directions.append(horizontal)
+            else:
+                if abs(dx) > config.direction_margin:
+                    directions.append(horizontal)
+                if abs(dy) > config.direction_margin:
+                    directions.append(vertical)
 
             modifier: Optional[str] = None
-            if directional:
+            if directions:
                 different_classes = (
                     labels is not None
                     and len(labels) == len(boxes)
@@ -132,7 +156,8 @@ def infer_paper_relations(
                         modifier = "very_close"
                     elif normalized < config.close_threshold:
                         modifier = "close"
-                pair_relations.append((directional, modifier or ""))
+                for directional in directions:
+                    pair_relations.append((directional, modifier or ""))
 
             if valid_depths is not None:
                 depth_delta = float(valid_depths[target]) - float(valid_depths[source])
@@ -300,6 +325,32 @@ def _relation_relevant(
     )
 
 
+def _canonical_label(label: str) -> str:
+    """Strip the _N suffix and canonicalize, matching the mark vocabulary."""
+    text = _normalize(re.sub(r"_\d+$", "", str(label)))
+    try:
+        from gom.question_intent import canonical_object_label
+
+        return canonical_object_label(text) or text
+    except Exception:
+        return text
+
+
+def _question_object_terms(question: str) -> Set[str]:
+    """Canonical object terms the question asks about (empty if unparseable)."""
+    try:
+        from gom.question_intent import parse_question_intent
+
+        parsed = parse_question_intent(question)
+        return {
+            _canonical_label(term)
+            for term in (*parsed.object_terms, *parsed.open_terms)
+            if term
+        }
+    except Exception:
+        return set()
+
+
 def _query_relation_terms(question: str) -> Tuple[str, ...]:
     try:
         from gom.question_intent import parse_question_intent
@@ -309,9 +360,17 @@ def _query_relation_terms(question: str) -> Tuple[str, ...]:
             "next_to": "near",
             "on_top_of": "above",
         }
-        return tuple(
-            sorted(canonical.get(term, term) for term in parsed.relation_terms)
-        )
+        terms = {canonical.get(term, term) for term in parsed.relation_terms}
+        # A relation term makes its whole axis relevant. "to the left or to the
+        # right of X" is one question about the horizontal axis, but the phrase
+        # matcher returns a single term, so the edge the question is really about
+        # was ranked as irrelevant half the time -- on exactly the disjunctive
+        # left/right questions that are the worst-performing bucket.
+        for axis in (("left_of", "right_of"), ("above", "below"),
+                     ("in_front_of", "behind")):
+            if terms.intersection(axis):
+                terms.update(axis)
+        return tuple(sorted(terms))
     except Exception:
         return tuple(
             alias
@@ -339,10 +398,24 @@ def filter_paper_graph(
     given) that branch instead keeps the top-K objects by ``score * sqrt(area)``
     so an unmatchable query degrades to a few salient marks, not a mark-storm.
     """
+    # The question's own parsed object terms, canonicalized the same way detector
+    # labels are. Algorithm 3 as published compares a detector label's WordNet
+    # aliases against the raw question string, which silently fails on the single
+    # most common case in this eval: the question says "man", the mark says
+    # "person" (canonical_object_label maps man/woman/child -> person), and
+    # label_aliases("person") is {person, persons, persones}. Every human mark
+    # therefore went unmatched, Algorithm 3 fell through to its zero-match branch,
+    # and the arrow that got drawn was between whatever two objects were nearest.
+    query_terms = _question_object_terms(question)
     matched: List[int] = []
     for index, label in enumerate(labels):
         aliases = label_aliases(label)
         lexical = any(_contains_phrase(question, alias) for alias in aliases)
+        if not lexical and query_terms:
+            canonical = _canonical_label(label)
+            lexical = canonical in query_terms or any(
+                _canonical_label(alias) in query_terms for alias in aliases
+            )
         semantic = bool(
             not lexical
             and semantic_similarity
@@ -392,10 +465,22 @@ def filter_paper_graph(
 
     relation_terms = _query_relation_terms(question)
     selected: List[Dict[str, Any]] = []
-    for head in kept:
+    # Only question-matched objects emit arrows. In the single-match branch `kept`
+    # also holds every out-neighbour, and each of those used to get its own top-1
+    # arrow -- 38% of all rendered arrows connected pairs the question never named,
+    # and those distractor arrows cost every model 9-19 points on left/right
+    # questions. Neighbours stay *marked*; they just stop being arrow sources.
+    heads = sorted(set(matched) & set(kept)) or kept
+    matched_set = set(matched)
+    for head in heads:
+        # Rank on the PAIR first, then the relation type, then distance. Ranking
+        # on relation type alone let a query object's arrow point at whichever
+        # neighbour happened to be nearest, so 38% of left/right questions got an
+        # arrow between two objects the question never named.
         ranked = sorted(
             by_head.get(head, []),
             key=lambda edge: (
+                0 if int(edge["tgt_idx"]) in matched_set else 1,
                 0
                 if _relation_relevant(
                     relation_terms,
@@ -407,7 +492,15 @@ def filter_paper_graph(
                 float(edge.get("distance", math.inf)),
             ),
         )
-        selected.extend(ranked[: max(0, int(config.top_k_per_head))])
+        for edge in ranked[: max(0, int(config.top_k_per_head))]:
+            edge["_pair"] = 0 if int(edge["tgt_idx"]) in matched_set else 1
+            edge["_relevant"] = 0 if _relation_relevant(
+                relation_terms,
+                str(edge.get("display_relation", edge["relation"])),
+                semantic_similarity=semantic_similarity,
+                threshold=config.query_relation_threshold,
+            ) else 1
+            selected.append(edge)
 
     deduplicated: List[Dict[str, Any]] = []
     seen_pairs: Set[Tuple[int, int]] = set()
@@ -417,6 +510,38 @@ def filter_paper_graph(
             continue
         seen_pairs.add(pair)
         deduplicated.append(edge)
+
+    # Drop pairs whose centres nearly coincide: no arc can convey their direction.
+    if config.min_centroid_separation_px > 0 and boxes is not None:
+        def _far_enough(edge: Dict[str, Any]) -> bool:
+            try:
+                a, b = boxes[int(edge["src_idx"])], boxes[int(edge["tgt_idx"])]
+            except (IndexError, KeyError, TypeError, ValueError):
+                return True
+            ax_, ay = (float(a[0]) + float(a[2])) / 2.0, (float(a[1]) + float(a[3])) / 2.0
+            bx, by = (float(b[0]) + float(b[2])) / 2.0, (float(b[1]) + float(b[3])) / 2.0
+            return math.hypot(bx - ax_, by - ay) >= config.min_centroid_separation_px
+
+        deduplicated = [edge for edge in deduplicated if _far_enough(edge)]
+
+    # Global arrow cap. top_k_per_head bounds arrows per source but not per image:
+    # a question whose terms match eight objects drew eight arrows, and the crowd
+    # is what pushed relation labels up to 200 px off their own arc. Question-
+    # relevant relations survive first, then the shortest.
+    if config.max_total_relations > 0:
+        deduplicated = sorted(
+            deduplicated,
+            key=lambda edge: (
+                edge.get("_pair", 1),
+                edge.get("_relevant", 1),
+                float(edge.get("distance", math.inf)),
+                int(edge["src_idx"]),
+                int(edge["tgt_idx"]),
+            ),
+        )[: config.max_total_relations]
+    for edge in deduplicated:
+        edge.pop("_relevant", None)
+        edge.pop("_pair", None)
 
     remap = {old: new for new, old in enumerate(kept)}
     remapped: List[Dict[str, Any]] = []
@@ -432,16 +557,28 @@ def filter_paper_graph(
 
 
 def relation_digest(relationships: Iterable[Mapping[str, Any]]) -> str:
-    """Stable digest shared by graph, triples, render metadata, and inference."""
-    canonical = [
-        {
-            "src_idx": int(edge["src_idx"]),
-            "tgt_idx": int(edge["tgt_idx"]),
-            "relation": str(edge["relation"]),
-            "modifier": str(edge.get("modifier", "")),
-        }
-        for edge in relationships
-    ]
+    """Stable digest shared by graph, triples, render metadata, and inference.
+
+    Order-insensitive: the digest identifies the edge *set*. The graph records it
+    from the selection list while the renderer records it after a round-trip
+    through NetworkX, which re-orders edges by source node. Those two orderings
+    agreed only by coincidence, and any reordering in Algorithm 3 broke inference
+    with "graph/render edge digest mismatch" on the images that got reordered.
+    """
+    canonical = sorted(
+        (
+            {
+                "src_idx": int(edge["src_idx"]),
+                "tgt_idx": int(edge["tgt_idx"]),
+                "relation": str(edge["relation"]),
+                "modifier": str(edge.get("modifier", "")),
+            }
+            for edge in relationships
+        ),
+        key=lambda edge: (
+            edge["src_idx"], edge["tgt_idx"], edge["relation"], edge["modifier"]
+        ),
+    )
     payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

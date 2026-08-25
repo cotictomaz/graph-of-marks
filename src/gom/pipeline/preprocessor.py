@@ -553,6 +553,13 @@ class PreprocessorConfig:
 
     # Per-object relationship limits
     max_relations_per_object: int = 3  # Maximum relationships to extract per object
+    # Arrows per rendered image, 0 = unbounded. Bounds the whole render, not
+    # just each source object; a crowded render pushes relation labels far
+    # off their own arcs.
+    max_relations_total: int = 0
+    # Arrows between objects whose centres nearly coincide cannot show direction;
+    # 0 disables the filter (published behaviour).
+    min_centroid_separation_px: float = 0.0
     min_relations_per_object: int = 0  # Do not invent relations merely to meet a quota
 
     # CLIP embedding cache configuration
@@ -700,6 +707,19 @@ class PreprocessorConfig:
 
 
 # ----------------------------- Main Preprocessor Class -----------------------------
+# Specific -> generic, used ONLY by _inherit_specific_label. Deliberately not
+# gom.question_intent.canonical_object_label: there, boy/girl canonicalize to
+# themselves (so inheritance silently never fired for them -- 6 who-rows stuck on
+# person_N), and adding them to that table would make every direct question about a
+# boy or girl query the generic "person" instead, degrading the queries that work
+# today. Two tables because the two jobs genuinely disagree.
+_SUBTYPE_OF = {
+    "man": "person", "woman": "person", "boy": "person", "girl": "person",
+    "child": "person", "kid": "person", "guy": "person", "lady": "person",
+    "gentleman": "person",
+}
+
+
 class ImageGraphPreprocessor:
     """
     End-to-end image-to-graph preprocessing pipeline.
@@ -1500,7 +1520,32 @@ class ImageGraphPreprocessor:
             added += 1
         counts["owlvit_targeted"] = counts.get("owlvit_targeted", 0) + added
         return detections
-    
+
+    @staticmethod
+    def _inherit_specific_label(labels: List[str], dropped: int, survivor: int) -> bool:
+        """Let the surviving mark keep the question's specific name.
+
+        Dedup keeps the higher-scoring box, which is always the closed-vocabulary
+        one: "Who is wearing a tee shirt?" detects man@0.47 on the very mask the
+        ensemble already called person@0.54, and `man` is dropped at mask IoU
+        1.000. The mark stays `person_1`, which is what the model then answers --
+        0 against gold "man", and the single largest ID-leak mechanism in the run.
+        The two detections are the same object by construction here, so the
+        specific name is strictly better than the generic one.
+
+        Only fires when the specific term canonicalizes onto the generic one, so
+        it can never rename a genuinely different class (van does not become bus).
+        Returns True when a rename happened.
+        """
+        specific = str(labels[dropped]).strip().lower()
+        generic = str(labels[survivor]).strip().lower()
+        if not specific or not generic or specific == generic:
+            return False
+        if _SUBTYPE_OF.get(specific) != generic:
+            return False
+        labels[survivor] = labels[dropped]
+        return True
+
     def _run_detectors_batch(self, images: List[Image.Image]) -> List[Dict[str, Any]]:
         """
         Execute detectors on a batch of images for 4-8x speedup.
@@ -2476,6 +2521,8 @@ class ImageGraphPreprocessor:
         Returns:
             Tuple of (filtered_boxes, filtered_labels, filtered_scores, filtered_masks, filtered_depths, kept_indices)
         """
+        self._rivals = {}
+        self._rivals_records = []
         if len(boxes) <= 1:
             return boxes, labels, scores, masks, depths, list(range(len(boxes)))
         
@@ -2739,6 +2786,26 @@ class ImageGraphPreprocessor:
                             remove_idx = j if scores[i] >= scores[j] else i
                     
                     if should_remove:
+                        survivor = j if remove_idx == i else i
+                        # Probe data for the wrong-class-name problem: confidence
+                        # does not separate a mark the model copied and got wrong
+                        # (0.537) from any other mark (0.529), so whether a rival
+                        # detector claimed the same box is the next signal to test.
+                        # Recorded only -- nothing filters on it in this run.
+                        self._rivals.setdefault(survivor, []).append(
+                            {
+                                "label": str(labels[remove_idx]),
+                                "score": float(scores[remove_idx]),
+                                "reason": reason,
+                            }
+                        )
+                        if self._inherit_specific_label(
+                            labels, remove_idx, survivor
+                        ):
+                            print(
+                                f"  [DEDUP] {labels[survivor]} inherits the "
+                                f"question's specific name from the duplicate"
+                            )
                         if remove_idx == i:
                             keep.discard(i)
                             removed_count += 1
@@ -2752,6 +2819,15 @@ class ImageGraphPreprocessor:
         
         # Filter to kept indices
         kept_indices = sorted(keep)
+        self._rivals_records = [
+            {
+                "box": [float(v) for v in boxes[i]],
+                "label": str(labels[i]),
+                "score": float(scores[i]),
+                "rivals": self._rivals.get(i, []),
+            }
+            for i in kept_indices
+        ]
         filtered_boxes = [boxes[i] for i in kept_indices]
         filtered_labels = [labels[i] for i in kept_indices]
         filtered_scores = [scores[i] for i in kept_indices]
@@ -4248,6 +4324,12 @@ class ImageGraphPreprocessor:
                         self.cfg.threshold_relation_similarity
                     ),
                     top_k_per_head=int(self.cfg.max_relations_per_object),
+                    max_total_relations=int(
+                        getattr(self.cfg, "max_relations_total", 0)
+                    ),
+                    min_centroid_separation_px=float(
+                        getattr(self.cfg, "min_centroid_separation_px", 0.0)
+                    ),
                 ),
                 semantic_similarity=fasttext if fasttext.available else None,
                 boxes=boxes,
@@ -4727,6 +4809,30 @@ class ImageGraphPreprocessor:
             label_overlaps = getattr(variant_fig, "_gom_label_overlap_count", None)
             metadata[str(name)] = {
                 "label_overlap_count": label_overlaps,
+                # label_overlap_count alone passed renders whose every arrowhead was
+                # buried under a label box and whose relation labels floated free of
+                # their arcs; these three make that checkable.
+                "arrowhead_occluded_count": getattr(
+                    variant_fig, "_gom_arrowhead_occluded_count", None
+                ),
+                "relation_label_unbound_count": getattr(
+                    variant_fig, "_gom_relation_label_unbound_count", None
+                ),
+                "relation_label_dropped_count": getattr(
+                    variant_fig, "_gom_relation_label_dropped_count", None
+                ),
+                "relation_label_max_dist_px": getattr(
+                    variant_fig, "_gom_relation_label_max_dist_px", None
+                ),
+                "arrow_shaft_min_px": getattr(
+                    variant_fig, "_gom_arrow_shaft_min_px", None
+                ),
+                "arrows_short_count": getattr(
+                    variant_fig, "_gom_arrows_short_count", None
+                ),
+                "mask_contours_max": getattr(
+                    variant_fig, "_gom_mask_contours_max", None
+                ),
                 "output_path": output_path.as_posix(),
                 "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
                 "effective_style": visualizer.effective_style(image.size),
@@ -4740,6 +4846,19 @@ class ImageGraphPreprocessor:
                 ),
             }
             self.logger.info(f"   Saved variant {name}: {output_path}")
+
+        # Detector-corroboration probe, written beside the artifacts. Joined to the
+        # graph by box IoU afterwards; deliberately a side file so nothing in the
+        # main path depends on it and a bad join cannot corrupt a run.
+        probe = list(getattr(self, "_rivals_records", []) or [])
+        if probe:
+            # Each record carries its own box, captured at suppression time. It is
+            # NOT zipped against the final marks: Algorithm 3 reindexes after
+            # suppression, so an index join would silently misalign whenever the
+            # lengths happened to match. Join by box IoU when analysing.
+            (Path(self.cfg.output_folder) / f"{image_name}_detection_rivals.json").write_text(
+                json.dumps(probe), encoding="utf-8"
+            )
 
         metadata_path = (
             Path(self.cfg.output_folder) / f"{image_name}_render_variants.json"

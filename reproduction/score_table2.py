@@ -251,7 +251,7 @@ def main() -> int:
     parser.add_argument("--single-setting", action="store_true")
     parser.add_argument("--prompt-profile", default="paper_declared")
     parser.add_argument(
-        "--question-filter", choices=("none", "appearance"), default="none"
+        "--question-filter", choices=("none", "appearance", "spatial"), default="none"
     )
     parser.add_argument(
         "--extra-conditions",
@@ -285,8 +285,8 @@ def main() -> int:
             preprocessing = args.data_root / "artifacts" / dataset / "preprocessing"
             graphs = graph_paths(rows, preprocessing, args.artifact_granularity)
             keep = None
-            if args.question_filter == "appearance" and dataset != "refcocog":
-                keep = keep_ids(rows)
+            if args.question_filter != "none" and dataset != "refcocog":
+                keep = keep_ids(rows, args.question_filter)
             extra = [v.strip() for v in args.extra_conditions.split(",") if v.strip()]
             spec_conditions = list(spec["conditions"])
             if args.conditions:

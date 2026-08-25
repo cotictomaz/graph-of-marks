@@ -171,6 +171,10 @@ except Exception as _exc:
 
         # Relationship inference constraints
         max_relations_per_object: int = 3  # Maximum relationships per object
+        # Arrows per rendered image, 0 = unbounded. Bounds the whole render, not
+        # just each source object; a crowded render pushes relation labels far
+        # off their own arcs.
+        max_relations_total: int = 0
         min_relations_per_object: int = 0  # Minimum relationships per object
         # CLIP-based relationship scoring limits (performance tuning)
         relations_max_clip_pairs: int = 1000  # Global limit on CLIP-scored pairs
@@ -488,6 +492,32 @@ _GOM_V3_PROFILE = {
     "same_class_fragment_containment": 0.70,
 }
 
+# gom_v4: gom_v3 plus the fixes from the 20-case gom_v3 flip audit
+# (reproduction/FLIP_EXAMPLES_PAPER_GOM.md). The render half - arrows drawn before
+# labels, heads reserved in the label registry, endpoints clipped to the target box,
+# relation labels seated on the drawn arc with a leader - lives in visualizer.py and
+# applies to every profile; the detector-query and relation-selection halves live in
+# question_intent.py and relations/paper.py. Only the head size is a profile field:
+# 12.0 renders a 6.7 px head that the 6.25 px white halo swallows.
+_GOM_V4_PROFILE = {
+    **_GOM_V3_PROFILE,
+    "profile": "gom_v4",
+    "rel_arrow_mutation_scale": 18.0,
+    "max_relations_total": 5,
+}
+
+# gom_v5: gom_v4 plus the fixes from the gom_v4 flip-gallery review. The render
+# half lives in visualizer.py and applies to every profile (arrows are no longer
+# clipped to the box, so the shaft is visible; mask outlines use RETR_EXTERNAL plus
+# an area floor, so hole boundaries and specks are no longer stroked). The two
+# profile fields here are the per-image arrow cap's companion: drop relations whose
+# endpoints nearly coincide, since no arc can show their direction.
+_GOM_V5_PROFILE = {
+    **_GOM_V4_PROFILE,
+    "profile": "gom_v5",
+    "min_centroid_separation_px": 20.0,
+}
+
 _PROFILE_TABLES = {
     "paper_legacy": _LEGACY_PROFILE,
     "paper_aaai26": _PAPER_AAAI26_PROFILE,
@@ -498,6 +528,8 @@ _PROFILE_TABLES = {
     "paper_aaai26_declutter": _PAPER_AAAI26_DECLUTTER_PROFILE,
     "gom_v2": _GOM_V2_PROFILE,
     "gom_v3": _GOM_V3_PROFILE,
+    "gom_v4": _GOM_V4_PROFILE,
+    "gom_v5": _GOM_V5_PROFILE,
 }
 
 

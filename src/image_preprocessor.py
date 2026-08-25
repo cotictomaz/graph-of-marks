@@ -33,7 +33,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "quality_vqa", "paper_legacy", "paper_aaai26",
             "paper_aaai26_outline", "paper_aaai26_lowfill",
             "paper_aaai26_outline_clean", "paper_aaai26_outline_thin",
-            "paper_aaai26_declutter", "gom_v2", "gom_v3",
+            "paper_aaai26_declutter", "gom_v2", "gom_v3", "gom_v4", "gom_v5",
         ],
         default="quality_vqa",
         help="Quality-first defaults or historical paper rendering/filtering",
